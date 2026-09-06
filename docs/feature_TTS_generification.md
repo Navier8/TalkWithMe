@@ -5,10 +5,11 @@ The goal is to move away from a "lowest common denominator" approach, and provid
 discoverability of unique TTS engine features. Those unique features can then be
 exposed in TalkWithMe's Servers modal in a dynamic UI.
 
-> **Status (2026-09-04):** M0–M4.1 complete (pytest 641 green + both Node
-> suites green). M5: **OmniVoice fully verified live**, including the
-> zero-code-change proof; Chatterbox, Qwen3-TTS and dots.tts are pending
-> (single-engine-at-a-time box) — see the runbook at the end of M5.
+> **Status (2026-09-05):** M0–M4.1 complete (pytest 645 green + both Node
+> suites green). M5: **OmniVoice and Chatterbox fully verified live**
+> (2026-09-04 / 2026-09-05), including the zero-code-change proof
+> (OmniVoice); Qwen3-TTS and dots.tts are pending (single-engine-at-a-time
+> box) — see the runbook at the end of M5.
 
 ## Current state
 
@@ -78,8 +79,8 @@ code handles the FastAPI side of things entirely.
 
 ## Implementation plan
 
-Status: **M0 LOCKED (2026-09-04); M1 complete; M2 complete; M3 complete (2026-09-04); M4 complete (2026-09-04)**
-Date: 2026-09-03 (plan), 2026-09-04 (M0 lock, M2–M4)
+Status: **M0 LOCKED (2026-09-04); M1 complete; M2 complete; M3 complete (2026-09-04); M4 complete (2026-09-04); M5 in progress (OmniVoice + Chatterbox verified live, 2026-09-05)**
+Date: 2026-09-03 (plan), 2026-09-04 (M0 lock, M2–M4), 2026-09-05 (M5: OmniVoice + Chatterbox live)
 
 M2 note: the legacy migration (T2) is implemented as a `TTSConfig`
 before-validator in `app/config.py` rather than inside `load_settings()` —
@@ -487,20 +488,81 @@ snapshot again.
   identical TTS behaviour on the canonical interpreter. Launch the app with
   the venv explicitly.
 
-**Pending (needs the other engines, see runbook below):** Chatterbox
-(incl. the watermark notice, and that it receives **no** `reference_text`),
-Qwen3-TTS (incl. `language: "en"` accepted for an `en` persona and mapped to
+**Chatterbox verified live (2026-09-05)** (app on `127.0.0.1:8001` against
+`impl/server_chatterbox.py`, `chatterbox-multilingual-v3`, cuda, 24 kHz).
+The app pointed at a transparent logging proxy in front of the engine
+(`127.0.0.1:8002 → 127.0.0.1:8000`) because the server's loguru output went
+to an unreadable terminal — the proxy log served as the engine's request
+log for the `reference_text` / T4 checks. Every M5 check passed:
+
+- **Legacy migration (T2):** a legacy `settings.yaml` left over from the
+  previously connected engine (`num_steps: 14`, `guidance_scale: 1.5`,
+  `seed: null`) folded into `parameters` at load and left disk on the first
+  API save — an install that has been pointed at different engines over its
+  lifetime keeps working with zero user action.
+- **Capabilities (T5):** the live doc is JSON-identical to both the
+  tts-serve snapshot and the `tests/fixtures/` copy (the raw diff is only
+  compact wire vs. pretty formatting); fetched exactly once per process
+  (cache).
+- **Probe (M4.1):** same matrix as OmniVoice — valid url → 200 (the probe
+  hits the engine directly, bypassing the saved url), 422 scheme-less, 422
+  empty, 503 dead, 200 trailing-slash. The probes left the cache slot
+  untouched: a plain `GET /api/tts/capabilities` right after the probes
+  still served from cache with no engine traffic.
+- **Frontend render:** the real `static/tts-params.js` (vm harness, live
+  doc) rendered exactly the seven non-app-managed params — `seed` →
+  blankable number input, `exaggeration` / `cfg_weight` / `temperature` →
+  sliders, `repetition_penalty` / `min_p` / `top_p` → sliders in the
+  collapsed advanced disclosure; the four app-managed fields never rendered
+  (in particular **no `reference_text`** row, although the test persona has
+  a transcript); the previous engine's saved values (`num_steps`,
+  `guidance_scale`) were not resurrected as rows. The info block showed
+  engine/model/device/24 kHz and the **watermark notice IS present**
+  ("This engine applies a neural watermark to the audio it generates.").
+- **Synthesis (T4/T6):** the baseline payload was exactly `text` +
+  `audio_base64` + `language: "en"` — **no `reference_text`** and no
+  previous-engine params (engine request log); 24 kHz PCM audio, engine
+  echoed a random seed. Then every advertised param at a non-default value
+  (`seed: 777`, `exaggeration: 0.75`, `cfg_weight: 0.3`, `temperature: 1.2`,
+  `repetition_penalty: 1.5`, `min_p: 0.1`, `top_p: 0.9`) → save 200,
+  synthesis 200, `seed: 777` echoed, all seven on the wire.
+- **T7 save-time validation (live):** out-of-range `seed: 5000` → 422 "TTS
+  parameter 'seed' must be <= 1000.0, got 5000" (warm cache).
+- **T4 drop (live):** the same engine-switch test as OmniVoice — a save
+  with the base-url spelling changed (`http://127.0.0.1:8002` →
+  `http://localhost:8002`, i.e. the engine-switch skip-gap) and the stale
+  `num_steps: 999` in the same save → 200 (T7 skipped by design); the next
+  synthesis was 200 and the engine's request log confirmed `num_steps` was
+  **not** sent.
+
+**Environment observation (keep for the runbook):** the box's 4 GiB GPU
+cannot sustain repeated `chatterbox-multilingual-v3` synthesis — the first
+synthesis after a process start succeeds, but the model process then holds
+~3.6 GiB and subsequent syntheses fail with a CUDA OOM (a 2 MiB
+allocation), surfacing in the app as 502s ("TTS server returned no audio").
+The server had to be restarted (same command, ~15 s model load from the HF
+cache) between the synthesis-heavy runbook steps. This is a
+tts-serve/GPU limitation, not an app defect — the app propagated the engine
+500s correctly (502 + warning, no spurious self-heal, which is 422-only; a
+500 does not invalidate the doc cache, as it should). On low-VRAM boxes,
+expect to restart the engine between synthesis steps.
+
+**Pending (needs the other engines, see runbook below):** Qwen3-TTS
+(incl. `language: "en"` accepted for an `en` persona and mapped to
 `English` server-side), dots.tts (48 kHz audio sanity), and the cross-engine
 base-URL switch re-render check in the live modal.
 
 #### M5 per-engine runbook (remaining engines)
 
-For each of **Chatterbox**, **Qwen3-TTS**, **dots.tts** (run on the box that
-has that engine installed; one engine at a time — the app's TTS config is a
-single slot):
+For each of **Qwen3-TTS**, **dots.tts** (run on the box that has that engine
+installed; one engine at a time — the app's TTS config is a single slot):
 
 1. Start the engine's tts-serve script (e.g.
-   `python impl/server_chatterbox.py`) and wait for `GET /health`.
+   `python impl/server_qwen3TTS.py`) and wait for `GET /health`.
+   (Low-VRAM boxes: see the Chatterbox observation above — a 4 GiB GPU OOMs
+   on *repeated* `chatterbox-multilingual-v3` syntheses even though the
+   first succeeds, so if a synthesis 502s with a CUDA OOM, restart the
+   engine and retry that step.)
 2. In the Servers dialog set TTS enabled + base URL (e.g.
    `http://localhost:8000`) and press **Refresh** (or change the URL — the
    field's `change` listener re-probes). The parameter section must
@@ -510,8 +572,6 @@ single slot):
 4. Modal check: rendered params must match the doc exactly (slider for
    int/number ranges, checkbox for boolean, select for enum, input for
    string; advanced collapsed).
-   - Chatterbox: the **watermark notice IS present**; confirm (via the
-     engine's request log) that **no `reference_text`** is sent on synthesis.
    - Qwen3-TTS: `language` for an `en` persona is sent as `en` and the server
      maps it to `English`.
    - dots.tts: audio sanity-checks at **48 kHz**; the `ode_method` select
