@@ -73,7 +73,7 @@ Startup decision matrix in `app/config.py::load_personas()` (lazy-imports `perso
 
 **Migration** (`persona_store.migrate_from_legacy_yaml()`): converts the old schema to per-persona directories. Each persona gets a `prompt.md` (frontmatter + system prompt) and `language.txt`, and the files referenced by its `avatar_image` / `reference_audio` / `reference_audio_transcript` **paths** are copied in as `image<ext>` / `ref.wav` / `ref.txt`. Success → the YAML is renamed to `personas.yaml.bak` so it never re-migrates. **Fatal** error (malformed YAML, unwritable directory, disk full) → raise `PersonaMigrationError` with the YAML left **untouched** and the partially created `Personas/` directory removed best-effort, so the next startup retries cleanly. **Minor** error (a referenced file missing, unreadable, or the wrong format — e.g. a non-wav `reference_audio`) → logged, that file skipped, migration continues. The YAML is the source of truth until the rename succeeds.
 
-**Directory is never renamed.** A persona *name* change (editor) writes a new `prompt.md` `name:` field but keeps the directory; deleting a persona deletes the directory. `GET /api/personas` returns personas in raw directory/creation order — sorting is a frontend concern (see **Persona list ordering**).
+**Rename moves the directory (when safe).** A persona *name* change rewrites the `prompt.md` `name:` field AND renames the persona's directory to `sanitize_persona_dirname(new_name)` — unless the sanitized name is empty or the target directory already exists (two distinct names can sanitize to the same directory, e.g. `O'Brien` and `O*Brien`), in which case the directory is kept and the frontmatter `name:` field preserves the identity. The move happens after the field writes and is best-effort: a skipped or failed rename keeps the old directory and the save still succeeds (a plain save — no name change — never moves a directory). Deleting a persona deletes the directory. `GET /api/personas` returns personas in raw directory/creation order — sorting is a frontend concern (see **Persona list ordering**).
 
 ## Architecture
 
@@ -169,7 +169,7 @@ Chat rooms are stored in `chatrooms.yaml` and managed via `get_chatrooms()` / `s
 | `GET` | `/api/personas` | List all personas (summary) |
 | `GET` | `/api/personas/{name}/detail` | Full persona detail |
 | `POST` | `/api/personas` | Create a new persona (multipart form: text fields + optional avatar/reference audio files) |
-| `PUT` | `/api/personas/{name}` | Update a persona (multipart form; rename cascades to chat rooms, directory is never renamed) |
+| `PUT` | `/api/personas/{name}` | Update a persona (multipart form; rename cascades to chat rooms and moves the directory to match the new sanitized name unless unsafe) |
 | `DELETE` | `/api/personas/{name}` | Delete a persona and its directory (cascades to chat rooms) |
 | `POST` | `/api/personas/{name}/clone` | Clone a persona with a numeric suffix (`Name_2`, `Name_3`, …) |
 | `GET` | `/api/personas/{name}/avatar` | Serve a persona's avatar image file |

@@ -6,6 +6,9 @@ are multipart/form-data; the TestClient sends form data as urlencoded when
 no files are attached, which FastAPI's Form fields parse identically.
 """
 
+import shutil
+from pathlib import Path
+
 import pytest
 
 import app.config as app_config
@@ -305,20 +308,113 @@ class TestUpdatePersona:
         assert "You are Alex, but updated." in prompt
         assert "Updated description" in prompt
 
-    def test_rename_updates_frontmatter_cascades_and_keeps_directory(self, client, personas_root):
+    def test_rename_moves_directory_rebuilds_frontmatter_and_cascades(self, client, personas_root):
         resp = client.put("/api/personas/Alex", data=self._data(name="Alexander"))
         assert resp.status_code == 200
         assert resp.json()["name"] == "Alexander"
 
-        # The directory keeps its original name; the frontmatter carries
-        # the new one (renaming directories would break external paths).
-        assert (personas_root / "Alex").is_dir()
-        prompt = (personas_root / "Alex" / "prompt.md").read_text()
-        assert "name: Alexander" in prompt
+        # The directory moves with the name...
+        assert not (personas_root / "Alex").exists()
+        new_dir = personas_root / "Alexander"
+        assert new_dir.is_dir()
+        # ...and prompt.md is rebuilt against the NEW directory name, so
+        # the frontmatter carries no redundant `name` field.
+        frontmatter, body = persona_store.parse_frontmatter((new_dir / "prompt.md").read_text())
+        assert "name" not in frontmatter
+        assert "You are Alex, but updated." in body
+        # The cache was refreshed: detail resolves through the new path.
+        detail = client.get("/api/personas/Alexander/detail")
+        assert detail.status_code == 200
+        assert detail.json()["name"] == "Alexander"
 
         rooms = client.get("/api/chatrooms").json()
         tng = next(r for r in rooms if r["name"] == "TNG")
         assert tng["persona_names"] == ["Alexander", "Luna"]
+
+    def test_rename_to_occupied_sanitized_directory_keeps_directory(self, client, personas_root):
+        # Two DISTINCT persona names can sanitize to the same directory
+        # name: "Alex2" and "Alex.2" both -> "Alex2".
+        data = self._data(name="Alex2")
+        assert client.post("/api/personas", data=data).status_code == 201
+        assert (personas_root / "Alex2").is_dir()
+
+        # Renaming Alex -> "Alex.2" is name-legal (distinct from "Alex2")
+        # but its sanitized directory is taken: the directory stays put
+        # and the frontmatter carries the identity.
+        resp = client.put("/api/personas/Alex", data=self._data(name="Alex.2"))
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "Alex.2"
+        assert (personas_root / "Alex").is_dir()
+        frontmatter, _ = persona_store.parse_frontmatter((personas_root / "Alex" / "prompt.md").read_text())
+        assert frontmatter["name"] == "Alex.2"
+
+    def test_rename_to_name_without_usable_characters_keeps_directory(self, client, personas_root):
+        # Update (unlike create) allows names that sanitize to nothing;
+        # the identity lives in the frontmatter, the directory is kept.
+        resp = client.put("/api/personas/Alex", data=self._data(name="***"))
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "***"
+        assert (personas_root / "Alex").is_dir()
+        frontmatter, _ = persona_store.parse_frontmatter((personas_root / "Alex" / "prompt.md").read_text())
+        assert frontmatter["name"] == "***"
+
+    def test_rename_failure_keeps_directory_and_save_succeeds(self, client, personas_root, monkeypatch):
+        # A failed directory move (permissions, locked dir on Windows)
+        # must not fail the save: the new name is committed, the old
+        # directory is kept, and the frontmatter carries the identity.
+        def _locked(self, target):
+            raise OSError("directory locked")
+
+        monkeypatch.setattr(Path, "rename", _locked)
+
+        resp = client.put("/api/personas/Alex", data=self._data(name="Alexander"))
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "Alexander"
+        assert (personas_root / "Alex").is_dir()
+        assert not (personas_root / "Alexander").exists()
+        frontmatter, _ = persona_store.parse_frontmatter((personas_root / "Alex" / "prompt.md").read_text())
+        assert frontmatter["name"] == "Alexander"
+
+    def test_save_without_rename_does_not_move_divergent_directory(self, client, personas_root):
+        # A directory whose name no longer matches the persona (left by an
+        # older version or a failed rename) must stay put on a plain save
+        # — only an actual name change moves it.
+        shutil.move(str(personas_root / "Alex"), str(personas_root / "Alex_2"))
+        app_config.set_personas_cache(rescan_personas(personas_root))
+        # The frontmatter has no `name` field, so the persona now loads
+        # under the directory name.
+        names = [p["name"] for p in client.get("/api/personas").json()]
+        assert "Alex_2" in names
+
+        resp = client.put("/api/personas/Alex_2", data=self._data(name="Alex_2"))
+        assert resp.status_code == 200
+        assert (personas_root / "Alex_2").is_dir()
+        assert not (personas_root / "Alex").exists()
+
+    def test_clone_then_rename_moves_the_cloned_directory(self, client, personas_root):
+        # The reported user workflow: clone Alex -> "Alex_2", then rename
+        # the clone. The old behaviour left "Personas/Alex_2/" on disk
+        # for a persona named Bender.
+        clone = client.post("/api/personas/Alex/clone")
+        assert clone.status_code == 201
+        assert clone.json()["name"] == "Alex_2"
+        assert (personas_root / "Alex_2").is_dir()
+        # Marker file proving the directory's CONTENT moves with the rename
+        # (the update payload below overwrites every prompt field).
+        (personas_root / "Alex_2" / "memories.txt").write_text("cloned memory\n")
+
+        resp = client.put("/api/personas/Alex_2", data=self._data(name="Bender"))
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "Bender"
+        assert not (personas_root / "Alex_2").exists()
+        new_dir = personas_root / "Bender"
+        assert new_dir.is_dir()
+        assert (new_dir / "memories.txt").read_text() == "cloned memory\n"
+        frontmatter, _ = persona_store.parse_frontmatter((new_dir / "prompt.md").read_text())
+        assert "name" not in frontmatter
+        # The source persona is untouched.
+        assert (personas_root / "Alex").is_dir()
+        assert client.get("/api/personas/Alex/detail").status_code == 200
 
     def test_rename_to_existing_name_rejected(self, client, personas_root):
         resp = client.put("/api/personas/Alex", data=self._data(name="luna"))

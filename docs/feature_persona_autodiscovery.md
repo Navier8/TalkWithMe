@@ -247,9 +247,14 @@ description: ...
 ---
 ```
 
-Renaming an existing persona does NOT rename the persona directory, which already exists.
-Simply update/add the `name` field in the frontmatter to reflect the new name. The user can
-manually rename the directory in between application runs if desired.
+Renaming an existing persona updates/adds the `name` field in the frontmatter to reflect the
+new name, and also renames the persona directory to the sanitized new name — so the on-disk
+layout tracks the persona's identity instead of accumulating stale numbered directories
+(the typical "clone, then rename" workflow). The directory is NOT renamed when the sanitized
+new name is empty or when the target directory already exists (two distinct names can sanitize
+to the same directory — see the conflict note below); the frontmatter `name` field then
+preserves the identity. The rename is best-effort: a failed filesystem rename keeps the old
+directory and the save still succeeds.
 
 Note that it's possible for the user to unintentionally create directory naming conflicts.
 For example: two personas are created, named "Miles O'Brien" and "Miles O*Brien". These both

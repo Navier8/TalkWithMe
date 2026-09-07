@@ -334,10 +334,14 @@ def update_persona(
 ):
     """Update an existing persona in its directory (multipart/form-data).
 
-    Renaming rewrites the prompt.md frontmatter and cascades to chat
-    rooms; the persona DIRECTORY is never renamed — the directory name
-    is only a filesystem concern and renaming it would break any external
-    reference to the old path.
+    Renaming rewrites the prompt.md frontmatter, moves the persona
+    directory to match the sanitized new name (see
+    persona_store.rename_target_for for when that is unsafe), and
+    cascades to chat rooms. The directory move happens AFTER the fields
+    are written and is best-effort: when it is skipped (empty sanitized
+    name, target directory already exists) or fails (filesystem error),
+    the persona keeps its current directory and the frontmatter ``name``
+    field preserves its identity — the save still succeeds either way.
 
     Memory handling: clear_memories=True deletes memories.txt outright
     (an explicit user action — a failure here DOES fail the save, so the
@@ -363,6 +367,13 @@ def update_persona(
 
     image, audio = _read_uploads(avatar_image, reference_audio)
     persona_dir = existing.persona_dir
+    # A rename may also move the persona's directory to match the new
+    # name. The move is attempted AFTER the fields are written, so a
+    # failed rename degrades to the old behaviour (new name, old
+    # directory) instead of leaving a moved directory with stale files.
+    target_dir = None
+    if new_name != name:
+        target_dir = persona_store.rename_target_for(persona_dir, new_name)
 
     try:
         _apply_persona_fields(
@@ -389,6 +400,29 @@ def update_persona(
             # Best-effort: shrink an over-limit memories file to the new
             # budget. Never raises (see purge_memories_to_limit).
             persona_store.purge_memories_to_limit(persona_dir, memory_size)
+        if target_dir is not None and persona_store.rename_persona_dir(persona_dir, target_dir):
+            persona_dir = target_dir
+            # prompt.md was written against the OLD directory name, so its
+            # frontmatter now carries a `name` field duplicating the new
+            # directory. Rebuild it best-effort: a failure only leaves
+            # that redundant field in place, which is harmless (it still
+            # holds the right identity).
+            try:
+                persona_store.write_prompt_md(
+                    persona_dir,
+                    name=new_name,
+                    description=description or "",
+                    router_hints=router_hints,
+                    avatar_color=avatar_color,
+                    allow_tool_calls=allow_tool_calls,
+                    system_prompt=system_prompt,
+                    memory_size=memory_size,
+                )
+            except OSError as exc:
+                logger.warning(
+                    "Could not rewrite %s after renaming persona directory to %s: %s",
+                    persona_dir / persona_store.PROMPT_FILENAME, persona_dir.name, exc,
+                )
         updated = persona_store.load_persona_from_dir(persona_dir)
     except OSError as exc:
         logger.error("Failed to update persona '%s' in %s: %s", name, persona_dir, exc)
