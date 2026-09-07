@@ -6,6 +6,7 @@ never the app's config cache (that is the router tests' job).
 """
 
 import logging
+from pathlib import Path
 
 import pytest
 import yaml
@@ -28,6 +29,8 @@ from app.services.persona_store import (
     read_language_file,
     read_memories,
     remove_memories_file,
+    rename_persona_dir,
+    rename_target_for,
     scan_personas_directory,
     sanitize_persona_dirname,
     unique_persona_dirname,
@@ -175,6 +178,68 @@ class TestUniqueDirname:
         assert unique_persona_dirname(tmp_path, "Alex") == "Alex_2"
         (tmp_path / "Alex_2").mkdir()
         assert unique_persona_dirname(tmp_path, "Alex") == "Alex_3"
+
+
+class TestRenameTargetFor:
+    def test_free_sanitized_name_returns_target(self, tmp_path):
+        # GIVEN a persona directory whose name no longer matches the persona:
+        persona_dir = tmp_path / "Alex_2"
+        persona_dir.mkdir()
+
+        # WHEN the persona is renamed to a name with a free sanitized dir,
+        # THEN the target directory is reported:
+        assert rename_target_for(persona_dir, "Bender") == tmp_path / "Bender"
+
+    def test_name_with_directory_hostile_chars_still_moves(self, tmp_path):
+        # "Bo.b" sanitizes to "Bob"; the move target uses the sanitized name.
+        persona_dir = tmp_path / "Old"
+        persona_dir.mkdir()
+        assert rename_target_for(persona_dir, "Bo.b") == tmp_path / "Bob"
+
+    def test_sanitized_name_already_matches_directory_returns_none(self, tmp_path):
+        # "Bob!" sanitizes to the current directory name: nothing to move.
+        persona_dir = tmp_path / "Bob"
+        persona_dir.mkdir()
+        assert rename_target_for(persona_dir, "Bob!") is None
+
+    def test_name_without_usable_characters_returns_none(self, tmp_path):
+        persona_dir = tmp_path / "Bob"
+        persona_dir.mkdir()
+        assert rename_target_for(persona_dir, "***") is None
+
+    def test_occupied_target_returns_none(self, tmp_path):
+        # "Bo.b" sanitizes to "Bob", which is taken by another persona:
+        # clobbering it is never acceptable, so no move.
+        persona_dir = tmp_path / "Alex_2"
+        other = tmp_path / "Bob"
+        persona_dir.mkdir()
+        other.mkdir()
+        assert rename_target_for(persona_dir, "Bo.b") is None
+
+
+class TestRenamePersonaDir:
+    def test_moves_directory_including_files_and_returns_true(self, tmp_path):
+        persona_dir = tmp_path / "Old"
+        persona_dir.mkdir()
+        (persona_dir / "prompt.md").write_text("content")
+
+        assert rename_persona_dir(persona_dir, tmp_path / "New") is True
+        assert not persona_dir.exists()
+        assert (tmp_path / "New" / "prompt.md").read_text() == "content"
+
+    def test_oserror_returns_false_and_keeps_directory(self, tmp_path, monkeypatch):
+        # A locked/permission-denied directory must not raise: the persona
+        # stays in its old directory (frontmatter name is the identity).
+        persona_dir = tmp_path / "Old"
+        persona_dir.mkdir()
+
+        def _locked(self, target):
+            raise OSError("directory locked")
+
+        monkeypatch.setattr(Path, "rename", _locked)
+        assert rename_persona_dir(persona_dir, tmp_path / "New") is False
+        assert persona_dir.is_dir()
+        assert not (tmp_path / "New").exists()
 
 
 # ---------------------------------------------------------------------------

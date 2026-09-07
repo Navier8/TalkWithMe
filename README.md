@@ -164,7 +164,7 @@ In this editor, you can:
 
 Changes are persisted immediately to the `Personas/` directory (configured in `settings.general.personas_directory`) and the sidebar persona list is refreshed automatically. No server restart is needed.
 
-> **Note**: renaming or deleting a persona does not modify messages already visible in the chat panel — those retain the name they were created with. Renaming does not rename the on-disk directory (the name is recorded inside `prompt.md`), so a directory name may legitimately differ from the persona's displayed name.
+> **Note**: renaming or deleting a persona does not modify messages already visible in the chat panel — those retain the name they were created with. Renaming a persona also renames its on-disk directory (best-effort — see [Renaming a persona](#renaming-a-persona) below), so a directory name may occasionally differ from the persona's displayed name.
 
 Each persona is one directory: `Personas/<Name>/`. Its settings are persisted across these files:
 
@@ -194,6 +194,28 @@ A `name:` frontmatter line is written only when the persona's name differs from 
 (Note that the reference-audio language does not control what language the persona speaks. It refers
 specifically to the language of the supplied reference audio, if any, so that voice cloning
 can be more accurate)
+
+#### Renaming a persona
+
+Renaming a persona also renames its directory, so `Personas/<Name>/` keeps matching the
+persona's displayed name. This means the common "clone a persona, then rename the clone"
+workflow doesn't leave numbered directories like `Alex_2`, `Alex_3`, ... on disk.
+
+The directory rename is best-effort. In the following cases the persona's name is updated
+but the directory keeps its old name (the new name is recorded in the `name:` frontmatter
+line of `prompt.md`, so nothing is lost):
+
+- The new name contains no characters that can be used in a directory name (only letters,
+  numbers, spaces, hyphens, and underscores are allowed), so no directory name can be
+  derived from it.
+- The sanitized new name would collide with an existing directory. Different persona names
+  can sanitize to the same directory name (for example `O'Brien` and `O*Brien` both become
+  `OBrien`), and one persona's directory is never clobbered by another.
+- The filesystem refuses the rename (permissions, a locked directory, ...). The save still
+  succeeds; only the directory keeps its old name.
+
+A plain edit that doesn't change the name never moves the directory, and a new name whose
+sanitized form is already the directory's name has nothing to move either.
 
 #### Persona fields
 
