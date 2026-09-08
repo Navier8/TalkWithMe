@@ -172,6 +172,12 @@ class GeneralConfig(BaseModel):
     # stops injecting saved memories into system prompts — without touching
     # any persona's memory_size or deleting any memories.txt.
     enable_persona_memories: bool = True
+    # Global instructions appended to the END of every persona's system
+    # prompt in the chat flow (see _with_global_system_prompt in
+    # routers/chat.py). This is the one place for rules that used to be
+    # copy-pasted into every persona prompt (e.g. "no markdown — TTS can't
+    # render it"). Empty/whitespace-only = feature off, nothing appended.
+    global_system_prompt: str = ""
     # Where persona subdirectories live. Absolute, or relative to the
     # project root; None/empty falls back to <project root>/Personas.
     # yaml-only for now (no UI) — like the mcp: section, changes need a
@@ -181,16 +187,25 @@ class GeneralConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _strict_enable_persona_memories(cls, data):
-        """Reject (warn + default) a non-boolean enable_persona_memories.
+    def _coerce_hand_edited_yaml(cls, data):
+        """Degrade hand-edited settings.yaml typos instead of crashing startup.
 
-        The spec is strict: anything that is not a real boolean in
-        settings.yaml is invalid, logged, and replaced with the default
+        enable_persona_memories is strict: anything that is not a real boolean
+        in settings.yaml is invalid, logged, and replaced with the default
         (True). We intercept before pydantic's lax coercion, which would
         silently turn the string "false" into False — a far sneakier failure
         than a loud warning at startup.
+
+        global_system_prompt is the inverse: a bare key ("global_system_prompt:")
+        is perfectly valid YAML for "off", but parses as null — a plain str
+        field rejects that and would take the whole app down at startup for
+        what is just an empty value. Coerce null -> "" (same as omitting the
+        key); no warning, because an intentionally-cleared field would log on
+        every startup.
         """
-        if isinstance(data, dict) and "enable_persona_memories" in data:
+        if not isinstance(data, dict):
+            return data
+        if "enable_persona_memories" in data:
             value = data["enable_persona_memories"]
             if not isinstance(value, bool):
                 logger.warning(
@@ -199,6 +214,8 @@ class GeneralConfig(BaseModel):
                     value,
                 )
                 data = {**data, "enable_persona_memories": True}
+        if "global_system_prompt" in data and data["global_system_prompt"] is None:
+            data = {**data, "global_system_prompt": ""}
         return data
 
 

@@ -160,5 +160,6 @@ const genSettingsError = document.getElementById("gen-settings-error");
 const gsfMaxPersonaReplies = document.getElementById("gsf-max-persona-replies");
 const gsfPersonaNameMentions = document.getElementById("gsf-persona-name-mentions");
 const gsfMaxTurnsForContext = document.getElementById("gsf-max-turns-for-context");
+const gsfGlobalSystemPrompt = document.getElementById("gsf-global-system-prompt");
 const gsfShowToolCalls = document.getElementById("gsf-show-tool-calls");
 const gsfEnablePersonaMemories = document.getElementById("gsf-enable-persona-memories");

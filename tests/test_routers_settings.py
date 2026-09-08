@@ -75,6 +75,7 @@ class TestGetSettings:
             "max_turns_for_context": 6,
             "show_tool_calls": True,
             "enable_persona_memories": True,
+            "global_system_prompt": "",
         }
 
 
@@ -108,6 +109,7 @@ class TestUpdateSettings:
         current.general.max_turns_for_context = 12
         current.general.show_tool_calls = True
         current.general.enable_persona_memories = False  # non-default: preserved?
+        current.general.global_system_prompt = "No markdown, plain text only."  # non-default: preserved?
         monkeypatch.setattr(app_config, "_settings_cache", current)
 
         resp = client.put("/api/settings", json=base_update(
@@ -120,6 +122,7 @@ class TestUpdateSettings:
             "max_turns_for_context": 12,      # preserved
             "show_tool_calls": False,         # updated
             "enable_persona_memories": False, # preserved
+            "global_system_prompt": "No markdown, plain text only.",  # preserved
         }
 
     def test_missing_general_section_preserves_everything(self, client, monkeypatch):
@@ -131,6 +134,7 @@ class TestUpdateSettings:
         current.general.max_turns_for_context = 9
         current.general.show_tool_calls = False
         current.general.enable_persona_memories = False  # must not reset to True
+        current.general.global_system_prompt = "Plain text only."  # must not reset to ""
         monkeypatch.setattr(app_config, "_settings_cache", current)
 
         payload = base_update()
@@ -145,6 +149,7 @@ class TestUpdateSettings:
             "max_turns_for_context": 9,
             "show_tool_calls": False,
             "enable_persona_memories": False,
+            "global_system_prompt": "Plain text only.",
         }
 
     def test_enable_persona_memories_round_trip(self, client):
@@ -157,6 +162,35 @@ class TestUpdateSettings:
 
         # And it persisted to settings.yaml (redirected to tmp by the fixture).
         assert client.get("/api/settings").json()["general"]["enable_persona_memories"] is False
+
+    def test_global_system_prompt_round_trip(self, client):
+        """The General settings dialog sends the whole general section:
+        a set value must stick across a re-read."""
+        resp = client.put("/api/settings", json=base_update(
+            general={"global_system_prompt": "No markdown, plain text only."}))
+        assert resp.status_code == 200
+        assert resp.json()["general"]["global_system_prompt"] == "No markdown, plain text only."
+
+        # And it persisted to settings.yaml (redirected to tmp by the fixture).
+        assert (
+            client.get("/api/settings").json()["general"]["global_system_prompt"]
+            == "No markdown, plain text only."
+        )
+
+    def test_explicit_empty_string_clears_global_system_prompt(self, client, monkeypatch):
+        """None (omitted) keeps the value; an explicit "" (blank textarea)
+        clears it — the whole point of the field being Optional on the
+        request but plain str on the config."""
+        current = make_settings()
+        current.general.global_system_prompt = "Old global rules."
+        monkeypatch.setattr(app_config, "_settings_cache", current)
+
+        resp = client.put("/api/settings", json=base_update(
+            general={"global_system_prompt": ""}))
+
+        assert resp.status_code == 200
+        assert resp.json()["general"]["global_system_prompt"] == ""
+        assert client.get("/api/settings").json()["general"]["global_system_prompt"] == ""
 
     def test_mcp_section_carried_over_from_current_config(self, client, monkeypatch):
         """The mcp: section is yaml-only. A UI save must not wipe it."""

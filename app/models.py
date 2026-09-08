@@ -212,6 +212,10 @@ class GeneralSettingsRequest(BaseModel):
     max_turns_for_context: Optional[int] = Field(default=None, ge=1, le=50)
     show_tool_calls: Optional[bool] = None
     enable_persona_memories: Optional[bool] = None
+    # None = keep the current value (partial update); an explicit "" (or any
+    # string) overrides it. This is what lets the General settings dialog
+    # clear the prompt by saving a blank textarea.
+    global_system_prompt: Optional[str] = None
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -253,6 +257,7 @@ class GeneralSettingsResponse(BaseModel):
     max_turns_for_context: int
     show_tool_calls: bool
     enable_persona_memories: bool
+    global_system_prompt: str
 
 
 class SettingsResponse(BaseModel):

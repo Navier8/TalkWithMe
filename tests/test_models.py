@@ -134,12 +134,29 @@ class TestGeneralSettingsRequestPartialUpdate:
             "max_turns_for_context": None,
             "show_tool_calls": None,
             "enable_persona_memories": None,
+            "global_system_prompt": None,
         }
 
     def test_general_settings_request_exclude_none_drops_omitted_fields(self):
         req = GeneralSettingsRequest(show_tool_calls=False)
         dumped = req.model_dump(exclude_none=True)
         assert dumped == {"show_tool_calls": False}
+
+    def test_general_settings_request_omitted_global_prompt_is_dropped(self):
+        # Omitted (None) -> absent from the partial-update dump -> the
+        # current server-side value is preserved (e.g. a Servers-dialog
+        # save must not wipe the prompt).
+        req = GeneralSettingsRequest(show_tool_calls=False)
+        dumped = req.model_dump(exclude_none=True)
+        assert "global_system_prompt" not in dumped
+
+    def test_general_settings_request_explicit_empty_string_clears_global_prompt(self):
+        # The inverse matters: a blank textarea sends "" (not None), and
+        # "" IS in the partial-update dump — so the dialog can actually
+        # clear a previously set prompt.
+        req = GeneralSettingsRequest(global_system_prompt="")
+        dumped = req.model_dump(exclude_none=True)
+        assert dumped == {"global_system_prompt": ""}
 
     def test_general_settings_request_out_of_range_replies_rejected(self):
         with pytest.raises(ValidationError):

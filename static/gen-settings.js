@@ -54,6 +54,7 @@ async function loadGenSettingsIntoForm() {
         gsfMaxTurnsForContext.value = data.general.max_turns_for_context ?? 6;
         gsfShowToolCalls.checked = data.general.show_tool_calls ?? true;
         gsfEnablePersonaMemories.checked = data.general.enable_persona_memories ?? true;
+        gsfGlobalSystemPrompt.value = data.general.global_system_prompt ?? "";
         return true;
     } catch (err) {
         console.error("Failed to load settings:", err);
@@ -106,6 +107,10 @@ async function submitGenSettings(e) {
             max_turns_for_context: maxTurns,
             show_tool_calls: gsfShowToolCalls.checked,
             enable_persona_memories: gsfEnablePersonaMemories.checked,
+            // Always sent (even blank): the general section is a partial
+            // update, so an omitted field would keep the old value and a
+            // cleared textarea could never actually clear the prompt.
+            global_system_prompt: gsfGlobalSystemPrompt.value,
         },
     };
 
