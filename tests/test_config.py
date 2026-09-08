@@ -270,6 +270,22 @@ class TestGeneralConfigBounds:
         with pytest.raises(ValidationError):
             GeneralConfig(max_turns_for_context=value)
 
+    def test_general_config_global_system_prompt_defaults_to_empty_string(self):
+        # Empty string, not None: the chat router appends it only when
+        # non-blank, and settings.yaml round-trips it as a plain string.
+        assert GeneralConfig().global_system_prompt == ""
+
+    def test_general_config_global_system_prompt_accepts_multiline_text(self):
+        cfg = GeneralConfig(global_system_prompt="Line one.\nLine two.")
+        assert cfg.global_system_prompt == "Line one.\nLine two."
+
+    def test_general_config_bare_yaml_null_global_system_prompt_coerced_to_empty_string(self):
+        # A hand-edited bare "global_system_prompt:" key is YAML null. The
+        # field is a plain str, so null must degrade to "" (feature off)
+        # rather than failing app startup with a ValidationError.
+        cfg = GeneralConfig(global_system_prompt=None)
+        assert cfg.global_system_prompt == ""
+
 
 class TestGeneralConfigEnablePersonaMemories:
     """general.enable_persona_memories is a STRICT boolean (docs/
@@ -468,6 +484,7 @@ tts:
   base_url: http://tts:1
 general:
   show_tool_calls: false
+  global_system_prompt: Do not use markdown. Use plain text only.
 mcp:
   servers:
     - name: my-server
@@ -478,7 +495,22 @@ mcp:
         assert settings.llm.base_url == "http://custom:1234"
         assert settings.tts.is_active is True
         assert settings.general.show_tool_calls is False
+        assert settings.general.global_system_prompt == "Do not use markdown. Use plain text only."
         assert settings.mcp.servers[0].name == "my-server"
+
+    def test_load_settings_bare_global_system_prompt_key_loads_as_empty(self, tmp_path):
+        # The user-visible scenario: someone hand-edits settings.yaml and
+        # leaves the key bare ("global_system_prompt:" = YAML null) to clear
+        # the feature. The app must start with the prompt off, not crash.
+        path = tmp_path / "settings.yaml"
+        path.write_text(
+            """
+general:
+  global_system_prompt:
+"""
+        )
+        settings = app_config.load_settings(path)
+        assert settings.general.global_system_prompt == ""
 
     def test_load_chatrooms_parses_rooms(self, tmp_path):
         path = tmp_path / "chatrooms.yaml"
@@ -502,13 +534,28 @@ class TestSaveLoadRoundTrip:
     def test_save_settings_round_trip(self, tmp_path):
         path = tmp_path / "settings.yaml"
         settings = make_settings(
-            general=GeneralConfig(max_persona_replies=3, show_tool_calls=False),
+            general=GeneralConfig(
+                max_persona_replies=3,
+                show_tool_calls=False,
+                global_system_prompt="No markdown, TTS can't render it.",
+            ),
         )
         app_config.save_settings(settings, path)
         assert path.exists()
         reloaded = yaml.safe_load(path.read_text())
         assert reloaded["general"]["max_persona_replies"] == 3
         assert reloaded["general"]["show_tool_calls"] is False
+        assert reloaded["general"]["global_system_prompt"] == "No markdown, TTS can't render it."
+
+    def test_save_settings_round_trip_defaults_empty_global_system_prompt(self, tmp_path):
+        # The field must land in settings.yaml even when unset (empty
+        # string, never omitted): the General settings dialog relies on
+        # GET returning a string it can put in the textarea.
+        path = tmp_path / "settings.yaml"
+        app_config.save_settings(make_settings(), path)
+
+        reloaded = yaml.safe_load(path.read_text())
+        assert reloaded["general"]["global_system_prompt"] == ""
 
     def test_save_chatrooms_round_trip(self, tmp_path):
         path = tmp_path / "chatrooms.yaml"

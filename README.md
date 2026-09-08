@@ -14,6 +14,7 @@ Follow the development of this app on my YouTube channel:
 - MCP integrations: https://www.youtube.com/watch?v=XhD9soU3hFM
 - Externalizing persona persistence: https://www.youtube.com/watch?v=Vj9rUy06Dcw
 - Adding persistent memories: https://www.youtube.com/watch?v=YD6cInSuQZs
+- Generifying the TTS server settings: (TODO video link here when ready)
 - Adding emotion to cloned AI voices: (TODO video link here when ready)
 
 ## Features
@@ -374,6 +375,24 @@ By default, every tool a persona calls shows up in the chat as a small chip (e.g
 - **Only the final answer is persisted.** Chat history stores the persona's text reply; tool calls and results are not saved. Tool chips are a live, in-view decoration only — they disappear on page reload or room switch.
 - **Errors become feedback.** If an MCP server fails or reports an error, the LLM receives a plain-text `Error: ...` result and can retry or explain the failure — the reply will never silently vanish because of a broken tool.
 - **Connections are stateless.** Every tool call opens a fresh MCP session (`initialize` handshake) and closes it afterwards. If your MCP server keeps long-lived session state, TalkWithMe does not preserve it between calls.
+
+## Global system prompt
+
+Sometimes, you want to specify instructions that apply to **all** personas, not just one or two
+selectively. You could do this by copy+pasting the instructions to each persona's system prompt,
+but this makes it difficult to change those instructions over time (you have to modify EVERY
+persona's system prompt). A better way is to use the global system prompt option, in the
+general Settings dialog:
+
+![General settings](screenshots/general_settings.jpg)
+
+Any text added here is automatically appended to the end of each persona's system prompt.
+Blank out the text field to disable this feature.
+
+Adding or modifying text here takes effect immediately on save - no restart is needed.
+
+Remember that the "echo chamber" feature bypasses the LLM entirely, so the
+global prompt has no effect there.
 
 ## Chat persistence
 
