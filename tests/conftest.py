@@ -91,3 +91,51 @@ def client():
     from app.main import app
 
     return TestClient(app)
+
+
+@pytest.fixture
+def raw_asgi_get():
+    """Run a GET against the app with an ASGI scope built the way uvicorn does.
+
+    httpx (the TestClient's transport) normalizes dot segments and
+    re-encodes the URL client-side, so a traversal URL can never reach the
+    handler through a normal request. uvicorn instead sets scope["path"]
+    to the percent-decoded target and scope["raw_path"] to the raw bytes —
+    that combination is what makes "..%2Fx" a traversal at all. This
+    helper reproduces uvicorn's scope construction (h11_impl.py) exactly.
+    """
+    import asyncio
+
+    from app.main import app
+
+    def _raw_asgi_get(path: str, raw_path: bytes | None = None):
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": path,
+            "raw_path": (raw_path if raw_path is not None else path.encode("ascii")),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"host", b"testserver")],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        }
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        result = {"status": None, "body": b""}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                result["status"] = message["status"]
+            elif message["type"] == "http.response.body":
+                result["body"] += message.get("body", b"")
+
+        asyncio.run(app(scope, receive, send))
+        return result["status"], result["body"]
+
+    return _raw_asgi_get

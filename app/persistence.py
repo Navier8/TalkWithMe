@@ -385,3 +385,31 @@ def clear_room(room_name: str) -> None:
                 shutil.rmtree(item)
 
     logger.info("Cleared persistence for room '%s'", room_name)
+
+
+def delete_room(room_name: str) -> None:
+    """Delete a room's persistence directory and everything in it.
+
+    Unlike clear_room() — which empties the directory but keeps it, because
+    'New Chat' expects the room to keep living — this removes the directory
+    itself: a deleted chat room leaves no trace, and re-creating a room with
+    the same name starts with an empty history instead of resurrecting the
+    deleted room's conversation.
+
+    Staged audio awaiting this room's message rows is dropped from the
+    registry as well — the files are being deleted anyway.
+
+    The room name is validated upstream (the chat room API only passes
+    names that exist in chatrooms.yaml, which are alphabet-checked at
+    creation), so it is joined onto the persistence root as-is.
+    """
+    with _HISTORY_LOCK:
+        for key in [k for k in _pending_audio if k[0] == room_name]:
+            _pending_audio.pop(key, None)
+
+        room = _room_dir(room_name)
+        if not room.exists():
+            return
+        shutil.rmtree(room)
+
+    logger.info("Deleted persistence directory for room '%s'", room_name)

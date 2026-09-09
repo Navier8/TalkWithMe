@@ -38,6 +38,21 @@ class TestChatRequest:
         )
         assert req.message_id == "abc-123"
 
+    @pytest.mark.parametrize(
+        "bad_room",
+        ["../outside", "../../outside", "room/name", "bad..room", ""],
+        ids=["dotdot", "dotdot-deeper", "slash", "dots", "empty"],
+    )
+    def test_chat_request_chat_room_outside_alphabet_rejected(self, bad_room):
+        # chat_room flows straight into on-disk persistence paths; these
+        # spellings are traversal attempts (or an empty string), not typos:
+        with pytest.raises(ValidationError, match="Room name may only contain"):
+            ChatRequest(message="hi", chat_room=bad_room)
+
+    def test_chat_request_chat_room_accepts_full_alphabet(self):
+        req = ChatRequest(message="hi", chat_room="My Room-1_x")
+        assert req.chat_room == "My Room-1_x"
+
 
 class TestSessionPersonasRequest:
     def test_session_personas_request_requires_at_least_one(self):

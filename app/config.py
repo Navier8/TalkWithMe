@@ -9,6 +9,7 @@ only for the one-time startup migration — never for anything else.
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -293,6 +294,23 @@ class PersonasConfig(BaseModel):
 # ---------------------------------------------------------------------------
 # Chat Rooms
 # ---------------------------------------------------------------------------
+
+# Room names are used verbatim as directory names under the persistence root,
+# so the alphabet doubles as a path-traversal guard: no dots, no slashes.
+# Single source of truth — every endpoint that accepts a room name must run
+# its value through is_valid_room_name() before it touches a path.
+ROOM_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9 _-]+$")
+
+
+def is_valid_room_name(name: str) -> bool:
+    """True when `name` is a legal chat-room name.
+
+    The alphabet is letters, numbers, spaces, hyphens, and underscores.
+    Because names become on-disk directory names, anything else (dots,
+    slashes, ...) is rejected as a traversal attempt, not a typo.
+    """
+    return bool(ROOM_NAME_PATTERN.match(name))
+
 
 class ChatRoom(BaseModel):
     """A named grouping of personas."""

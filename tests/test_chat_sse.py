@@ -141,6 +141,38 @@ def _chat(client, monkeypatch=None, **overrides) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Request validation
+# ---------------------------------------------------------------------------
+
+class TestRequestValidation:
+    def test_traversal_chat_room_returns_422_and_writes_nothing(
+        self, client, monkeypatch, persistence_root
+    ):
+        # chat_room flows straight into on-disk paths (history.json + audio
+        # files are created under the persistence root); an unvalidated
+        # "../evil" would let the persistence layer mkdir() and write
+        # outside of it. Validation must reject it before the LLM is even
+        # involved and before anything is persisted:
+        llm_calls = []
+
+        async def fake_stream(messages):
+            llm_calls.append(messages)
+            yield "nope"
+
+        monkeypatch.setattr(chat_router, "stream_chat", fake_stream)
+
+        resp = client.post("/api/chat", json={
+            "message": "hi", "who_answers": "Alex", "chat_room": "../evil",
+        })
+
+        assert resp.status_code == 422
+        assert "Room name may only contain" in str(resp.json()["detail"])
+        assert llm_calls == []
+        assert not (persistence_root.parent / "evil").exists()
+        assert not (persistence_root / "default" / "history.json").exists()
+
+
+# ---------------------------------------------------------------------------
 # Basic single-reply flow
 # ---------------------------------------------------------------------------
 

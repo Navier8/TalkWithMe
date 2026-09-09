@@ -114,32 +114,32 @@ class TestServeAudio:
         resp = client.get("/api/persist/audio/NoRoom/nope_0.webm")
         assert resp.status_code == 404
 
-    def test_raw_asgi_get_serves_a_legit_file(self, client, persistence_root):
-        # Sanity check for _raw_asgi_get itself: a normal path must work
-        # through the raw scope, proving the harness drives the real
-        # endpoint (not a 404-by-accident test suite).
+    def test_raw_asgi_get_serves_a_legit_file(self, client, persistence_root, raw_asgi_get):
+        # Sanity check for the raw_asgi_get fixture itself: a normal path
+        # must work through the raw scope, proving the harness drives the
+        # real endpoint (not a 404-by-accident test suite).
         persist_message("TNG", ChatMessage(role="user", content="hi"), "msg-1")
         client.post("/api/persist/audio?room=TNG",
                     json={"message_id": "msg-1", "audio_base64": b64(AUDIO_BYTES),
                           "mime_type": "audio/webm"})
 
-        status, body = _raw_asgi_get("/api/persist/audio/TNG/msg-1_0.webm")
+        status, body = raw_asgi_get("/api/persist/audio/TNG/msg-1_0.webm")
 
         assert status == 200
         assert body == AUDIO_BYTES
 
-    def test_serve_with_dotdot_room_segment_returns_422(self, persistence_root):
+    def test_serve_with_dotdot_room_segment_returns_422(self, persistence_root, raw_asgi_get):
         # A file OUTSIDE the persistence root that an unvalidated room
         # segment of ".." would let the endpoint read:
         sentinel = persistence_root.parent / "sentinel.txt"
         sentinel.write_bytes(b"top secret")
 
-        status, body = _raw_asgi_get("/api/persist/audio/../sentinel.txt")
+        status, body = raw_asgi_get("/api/persist/audio/../sentinel.txt")
 
         assert status == 422
         assert b"top secret" not in body
 
-    def test_serve_with_encoded_dotdot_room_segment_returns_422(self, persistence_root):
+    def test_serve_with_encoded_dotdot_room_segment_returns_422(self, persistence_root, raw_asgi_get):
         # The encoded spelling: uvicorn's unquote() turns "..%2Fx" into
         # "../x" BEFORE routing, so it arrives as the same traversal. The
         # scope carries the encoded raw_path and the decoded path, exactly
@@ -147,7 +147,7 @@ class TestServeAudio:
         sentinel = persistence_root.parent / "sentinel.txt"
         sentinel.write_bytes(b"top secret")
 
-        status, body = _raw_asgi_get(
+        status, body = raw_asgi_get(
             "/api/persist/audio/../sentinel.txt",
             raw_path=b"/api/persist/audio/..%2Fsentinel.txt",
         )
@@ -155,17 +155,17 @@ class TestServeAudio:
         assert status == 422
         assert b"top secret" not in body
 
-    def test_serve_with_dotdot_filename_returns_404(self):
+    def test_serve_with_dotdot_filename_returns_404(self, raw_asgi_get):
         # A filename of ".." resolves to the persistence root itself —
         # rejected as a non-file (404, same as a missing file).
-        status, body = _raw_asgi_get("/api/persist/audio/TNG/..")
+        status, body = raw_asgi_get("/api/persist/audio/TNG/..")
         assert status == 404
         assert b"top secret" not in body
 
-    def test_serve_with_backslash_filename_returns_404(self):
+    def test_serve_with_backslash_filename_returns_404(self, raw_asgi_get):
         # Backslashes are legal URL path characters and are traversal
         # separators on Windows — rejected everywhere for uniformity.
-        status, _ = _raw_asgi_get("/api/persist/audio/TNG/..\\sentinel.txt")
+        status, _ = raw_asgi_get("/api/persist/audio/TNG/..\\sentinel.txt")
         assert status == 404
 
 
@@ -231,48 +231,40 @@ class TestDeleteMessage:
         assert [m["id"] for m in _load_messages(None, "TNG")] == ["msg-1"]
 
 
-def _raw_asgi_get(path: str, raw_path: bytes | None = None):
-    """Run a GET against the app with an ASGI scope built the way uvicorn does.
+class TestRoomHistoryCount:
+    def test_returns_persisted_message_count(self, client):
+        persist_message("TNG", ChatMessage(role="user", content="one"), "msg-1")
+        persist_message("TNG", ChatMessage(role="assistant", content="two",
+                                           persona="Alex"), "msg-2")
 
-    httpx (the TestClient's transport) normalizes dot segments and
-    re-encodes the URL client-side, so a traversal URL can never reach the
-    handler through a normal request. uvicorn instead sets scope["path"]
-    to the percent-decoded target and scope["raw_path"] to the raw bytes —
-    that combination is what makes "..%2Fx" a traversal at all. This
-    helper reproduces uvicorn's scope construction (h11_impl.py) exactly.
-    """
-    import asyncio
+        resp = client.get("/api/persist/history/TNG")
 
-    from app.main import app
+        assert resp.status_code == 200
+        assert resp.json() == {"room": "TNG", "message_count": 2}
 
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "http_version": "1.1",
-        "method": "GET",
-        "scheme": "http",
-        "path": path,
-        "raw_path": (raw_path if raw_path is not None else path.encode("ascii")),
-        "query_string": b"",
-        "root_path": "",
-        "headers": [(b"host", b"testserver")],
-        "client": ("testclient", 50000),
-        "server": ("testserver", 80),
-    }
+    def test_room_without_history_returns_zero(self, client):
+        resp = client.get("/api/persist/history/TNG")
 
-    async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
+        assert resp.status_code == 200
+        assert resp.json() == {"room": "TNG", "message_count": 0}
 
-    result = {"status": None, "body": b""}
+    def test_read_only_does_not_touch_the_session(self, client):
+        # The whole point of this endpoint: probing a room's history must
+        # not switch the session to it (unlike load-room):
+        persist_message("TNG", ChatMessage(role="user", content="one"), "msg-1")
+        session.set_current_room("default")
 
-    async def send(message):
-        if message["type"] == "http.response.start":
-            result["status"] = message["status"]
-        elif message["type"] == "http.response.body":
-            result["body"] += message.get("body", b"")
+        resp = client.get("/api/persist/history/TNG")
 
-    asyncio.run(app(scope, receive, send))
-    return result["status"], result["body"]
+        assert resp.status_code == 200
+        assert session.current_room == "default"
+        assert [m.id for m in session.history] == []
+
+    def test_invalid_room_name_returns_422(self, client):
+        # Dots are not in the room-name alphabet — also blocks traversal:
+        resp = client.get("/api/persist/history/bad..room")
+
+        assert resp.status_code == 422
 
 
 def _load_messages(persistence_root, room: str):

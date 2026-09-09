@@ -136,8 +136,9 @@ Every message is persisted to disk automatically — no configuration toggle nee
 - **Location**: `chatrooms/<room_name>/history.json` + audio files alongside it.
 - **Format**: JSON with `datetime` (ISO-8601) and `messages` array. Each message has `id` (UUID), `sender` ("USER" or persona name), `text`, and `audio` (array of filenames).
 **Audio files**: Named `<message_uuid>_<index>.<ext>` (e.g. `d4ee3044_1.wav`). Extension derived from MIME type, falls back to `.bin`. Audio that arrives *before* the message row exists (STT recordings upload before the chat request creates the user message; streaming TTS sentences upload while the reply is still streaming) is staged as `<message_uuid>_pending_<hex8>.<ext>` and automatically attached to the message's audio list when `persist_message()` runs — the staging registry lives in `app/persistence.py` (`_pending_audio`), in-memory only, so a process restart in that window leaves the (valid) file unreferenced.
-- **Room switching**: `GET /api/session/load-room/<room_name>` loads persisted history and populates the in-memory session.
+- **Room switching**: `GET /api/session/load-room/<room_name>` loads persisted history and populates the in-memory session. The name is validated against the room-name alphabet (422) before it touches disk — it also becomes the session's current room, which a later `POST /api/session/new` feeds to `clear_room()`.
 - **New Chat**: `POST /api/session/new` clears both in-memory history and deletes all files in the room's persistence directory.
+- **Room-name alphabet**: Room names are used verbatim as directory names under the persistence root, so the shared check `is_valid_room_name()` in `app/config.py` (`^[a-zA-Z0-9 _-]+$` — no dots, no slashes) gates every endpoint that accepts a room name: `POST /api/chat`'s `chat_room` body field (422 at the Pydantic model, before the handler, LLM, or persistence layer runs), `GET /api/session/load-room/<room_name>` (422), room creation, and the persistence router's `room` query/path params (422). An unvalidated `../x` would `mkdir()` and write `history.json` outside the persistence root — dots are the tell, and room names never need them.
 - **Audio upload**: `POST /api/persist/audio?room=<room>` accepts base64 audio and appends it to the message's audio list. `room` (422, room-name alphabet) and `message_id` (422, no path separators) are validated up front — both flow into on-disk paths (a room dir is `mkdir`ed, the ID is interpolated into the filename), so an unvalidated `../x` would escape the persistence root.
 - **Audio playback**: `GET /api/persist/audio/<room>/<filename>` serves persisted audio files. `room` is validated against the room-name alphabet (422) and `filename` must be a plain filename (404) — otherwise a `..` segment (literal or `%2F`-encoded; uvicorn percent-decodes the target *before* routing, so it arrives as a legal single path segment) could read files outside the room's directory.
 - **Single-message deletion**: `DELETE /api/persist/message/<room>/<message_id>` removes one message's row from `history.json` and deletes all of its audio files (the row's `audio` list, its `_pending_audio` staging-registry entries, and a best-effort sweep for any remaining `<message_id>_`-prefixed file) — all under the same history lock that serializes uploads, so the `history.json` read-modify-write is atomic with respect to concurrent audio uploads (an upload that lands *after* the delete re-stages and leaves at most one orphaned staged file — the same residue class as the pre-existing crash orphans). When the room is the session's current room, the matching in-memory `ChatMessage` is removed too (the session stamps and tracks message IDs), so a deleted message stops reaching the LLM from the next turn. 404 when the room has no message with that ID (nothing deleted).
@@ -164,6 +165,7 @@ Chat rooms are stored in `chatrooms.yaml` and managed via `get_chatrooms()` / `s
 - Room names match case-insensitively and may only contain letters, numbers, spaces, hyphens, and underscores; creating a duplicate (or the reserved name `default`) is rejected with 409.
 - New rooms start with zero personas assigned; assigning a nonexistent persona returns 422.
 - Switching rooms loads persisted history from disk into the session rather than clearing it.
+- Deleting a room also deletes its persistence directory (`chatrooms/<name>/` — history + audio) via `persistence.delete_room()`: a re-created room with the same name starts with an empty history instead of resurrecting the deleted room's conversation. When the deleted room was the session's active room, the session is reset to `"default"` (its persisted history is loaded into memory) — otherwise it would keep pointing at a room that no longer exists, and the next message would recreate the deleted room's directory.
 
 ## API endpoints
 
@@ -181,18 +183,19 @@ Chat rooms are stored in `chatrooms.yaml` and managed via `get_chatrooms()` / `s
 | `GET` | `/api/chatrooms/all` | List all chat rooms including "default" (feeds the frontend dropdown) |
 | `GET` | `/api/chatrooms/{name}` | Get a single chat room (including "default") |
 | `POST` | `/api/chatrooms` | Create a chat room (starts with no personas) |
-| `DELETE` | `/api/chatrooms/{name}` | Delete a chat room |
+| `DELETE` | `/api/chatrooms/{name}` | Delete a chat room (also deletes its persistence directory; resets the session to "default" when it was the active room) |
 | `PUT` | `/api/chatrooms/{name}/personas` | Add personas to a room |
 | `DELETE` | `/api/chatrooms/{name}/personas/{persona_name}` | Remove a persona from a room |
 | `PUT` | `/api/chatrooms/{name}/echo-chamber` | Set/clear the room's echo chamber flag |
 | `GET` | `/api/session` | Get current session state (history + active personas + current room) |
 | `POST` | `/api/session/new` | Clear history and reset session (also clears persisted files) |
 | `POST` | `/api/session/personas` | Update active personas for the session |
-| `GET` | `/api/session/load-room/{room_name}` | Load persisted history for a room into the active session |
-| `POST` | `/api/chat` | Send a message; returns an SSE stream |
+| `GET` | `/api/session/load-room/{room_name}` | Load persisted history for a room into the active session (422 for names outside the room-name alphabet) |
+| `POST` | `/api/chat` | Send a message; returns an SSE stream (422 when `chat_room` is outside the room-name alphabet) |
 | `POST` | `/api/persist/audio?room=<room>` | Upload base64 audio for a persisted message |
 | `GET` | `/api/persist/audio/{room_name}/{filename}` | Serve a persisted audio file for playback |
 | `DELETE` | `/api/persist/message/{room_name}/{message_id}` | Delete one persisted message and all of its audio files (row + attached, staged, and prefix-orphaned files under the history lock); also removes the in-memory session entry when the room is the current one. 404 when the room has no message with that ID |
+| `GET` | `/api/persist/history/{room_name}` | Persisted message count for a room (`{room, message_count}`); read-only — unlike `load-room` it does NOT switch the session to the room. Used by the room-deletion confirmation to warn about history that will be deleted. 422 for names outside the room-name alphabet |
 | `GET` | `/api/tts/health` | TTS availability status |
 | `POST` | `/api/tts` | Proxy text → TTS `/synthesize`; returns `{audio_base64, sample_rate}` |
 | `GET` | `/api/tts/capabilities` | TTS server capabilities document (raw, no wrapper); 503 when TTS is inactive or unreachable. Optional `?base_url=<url>` probes a specific (possibly unsaved) url: 422 on a scheme-less url, 503 when unreachable, never touches the cached doc |
