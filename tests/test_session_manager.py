@@ -47,7 +47,9 @@ class TestMessages:
 
         msgs = persistence.load_history("TNG")
         assert msgs == [{"id": "uid-1", "sender": "USER", "text": "hello", "audio": []}]
-        assert manager.history == [ChatMessage(role="user", content="hello")]
+        # The message ID the message was persisted under is stamped onto the
+        # in-memory ChatMessage (selective deletion matches on it).
+        assert manager.history == [ChatMessage(role="user", content="hello", id="uid-1")]
 
     def test_add_assistant_message_persists_with_persona(self, manager):
         manager.add_assistant_message("why hello", "Luna", "aid-1")
@@ -55,10 +57,68 @@ class TestMessages:
         assert msgs[0]["sender"] == "Luna"
         assert msgs[0]["id"] == "aid-1"
 
+    def test_add_assistant_message_stores_id_on_in_memory_message(self, manager):
+        manager.add_assistant_message("why hello", "Luna", "aid-1")
+
+        assert manager.history == [
+            ChatMessage(role="assistant", content="why hello", persona="Luna", id="aid-1")
+        ]
+
     def test_history_returns_a_copy(self, manager):
         manager.add_user_message("hi", "uid-1")
         manager.history.clear()
         assert len(manager.history) == 1
+
+
+class TestRemoveMessageById:
+    def test_removes_exactly_the_matching_entry(self, manager):
+        manager.add_user_message("repeat", "uid-1")
+        manager.add_assistant_message("repeat", "Luna", "aid-1")
+        manager.add_user_message("repeat", "uid-2")
+
+        # WHEN we remove the middle entry by its ID,
+        # THEN the two text-identical siblings survive, untouched and in order:
+        assert manager.remove_message_by_id("aid-1") is True
+        assert [(m.id, m.content) for m in manager.history] == [
+            ("uid-1", "repeat"),
+            ("uid-2", "repeat"),
+        ]
+
+    def test_duplicate_text_and_sender_cannot_be_mistaken(self, manager):
+        # Two assistant messages from the SAME persona with the SAME text:
+        # only the one with the requested ID goes.
+        manager.add_assistant_message("same words", "Luna", "aid-1")
+        manager.add_assistant_message("same words", "Luna", "aid-2")
+
+        assert manager.remove_message_by_id("aid-2") is True
+
+        remaining = manager.history
+        assert len(remaining) == 1
+        assert remaining[0].id == "aid-1"
+        assert remaining[0].content == "same words"
+
+    def test_unknown_id_returns_false_and_changes_nothing(self, manager):
+        manager.add_user_message("hello", "uid-1")
+        manager.add_assistant_message("hi", "Luna", "aid-1")
+
+        assert manager.remove_message_by_id("nope") is False
+        assert [(m.id, m.role) for m in manager.history] == [
+            ("uid-1", "user"),
+            ("aid-1", "assistant"),
+        ]
+
+    def test_removal_stops_deleted_message_reaching_llm(self, manager):
+        # The point of ID tracking: a deleted message must not be supplied
+        # to the LLM for subsequent turns.
+        manager.add_user_message("remember this", "uid-1")
+        manager.add_user_message("next question", "uid-2")
+        manager.remove_message_by_id("uid-1")
+
+        messages = manager.build_llm_messages("sys", "Alex")
+        assert [m["content"] for m in messages] == [
+            "sys",
+            "next question",
+        ]
 
 
 class TestBuildLLMMessages:
@@ -131,9 +191,11 @@ class TestResetAndLoadRoom:
         manager.load_room("TNG")
 
         assert manager.current_room == "TNG"
+        # The persisted IDs are carried into the in-memory history, so
+        # ID-based operations (deletion) keep working on reloaded rooms.
         assert manager.history == [
-            ChatMessage(role="user", content="old hello"),
-            ChatMessage(role="assistant", content="old reply", persona="Luna"),
+            ChatMessage(role="user", content="old hello", id="uid-1"),
+            ChatMessage(role="assistant", content="old reply", persona="Luna", id="aid-1"),
         ]
 
     def test_load_room_replaces_existing_history(self, manager):

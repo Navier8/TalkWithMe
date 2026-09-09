@@ -1584,3 +1584,65 @@ html, body {
 .audio-play-btn:active {
     transform: scale(0.95);
 }
+
+/* Delete button per message row. Styled after .audio-play-btn, but kept
+   out of the way: invisible until the row is hovered (or the button is
+   keyboard-focused), and always visible on touch devices (no hover state).
+   A disabled button (streaming, not yet persisted) stays hidden even on
+   hover — there is nothing to delete mid-stream. */
+.message-delete-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    padding: 3px 7px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    line-height: 1;
+    opacity: 0;
+    margin-top: 2px;
+}
+
+/* Align the button with the bubble edge: right for user rows, left for
+   persona rows (the two content containers stack in opposite corners). */
+.user-message-content .message-delete-btn {
+    align-self: flex-end;
+}
+
+.bubble-content .message-delete-btn {
+    align-self: flex-start;
+}
+
+.message-row:hover .message-delete-btn,
+.message-row:focus-within .message-delete-btn {
+    opacity: 1;
+}
+
+.message-delete-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border-color: var(--border-color);
+}
+
+.message-delete-btn:active {
+    transform: scale(0.95);
+}
+
+.message-delete-btn:disabled {
+    cursor: default;
+}
+
+/* Disabled = still streaming = invisible even while hovering. */
+.message-row:hover .message-delete-btn:disabled,
+.message-row:focus-within .message-delete-btn:disabled {
+    opacity: 0;
+    pointer-events: none;
+}
+
+@media (hover: none) {
+    /* Touch devices: no hover to reveal the button, so keep it visible. */
+    .message-delete-btn:not(:disabled) {
+        opacity: 1;
+    }
+}
