@@ -12,4 +12,5 @@ testsetup.sh
 restore.sh
 .venv/
 startup.sh
+llm_api_key
 

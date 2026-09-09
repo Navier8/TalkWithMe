@@ -20,6 +20,8 @@ if str(PROJECT_ROOT) not in sys.path:
 import app.config as app_config
 import app.persistence as persistence
 import app.routers.persistence as persistence_router
+import app.services.llm as llm_module
+import app.services.llm_auth as llm_auth
 import app.services.tool_registry as tool_registry
 import app.services.tts_client as tts_client
 from app.session import session as global_session
@@ -50,6 +52,15 @@ def isolated_app_state(tmp_path, monkeypatch):
     # The TTS capabilities cache (single slot, docs and failures alike):
     # a doc cached by one test must not leak into the next.
     tts_client.invalidate_capabilities()
+    # The LLM API key: never read the real llm_api_key file or the
+    # developer's TALKWITHME_LLM_API_KEY, and never let a key cached by an
+    # earlier test leak into the next one.
+    monkeypatch.setattr(llm_auth, "_PROJECT_ROOT", tmp_path)
+    monkeypatch.delenv(llm_auth.ENV_VAR_NAME, raising=False)
+    llm_auth.invalidate_llm_api_key()
+    # The once-per-URL cleartext warning dedupe in llm.py must not survive
+    # a test boundary.
+    llm_module._warned_plaintext_urls.clear()
 
     # The global session singleton: start every test clean.
     global_session._history.clear()
@@ -61,6 +72,8 @@ def isolated_app_state(tmp_path, monkeypatch):
     persistence._pending_audio.clear()
     tool_registry.reset()
     tts_client.invalidate_capabilities()
+    llm_auth.invalidate_llm_api_key()
+    llm_module._warned_plaintext_urls.clear()
     global_session._history.clear()
     global_session._active_personas.clear()
     global_session.set_current_room("default")

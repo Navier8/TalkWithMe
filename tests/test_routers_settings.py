@@ -13,10 +13,13 @@ capabilities document is cached for the exact base_url being saved, so an
 engine switch is never bricked by a stale doc.
 """
 
+import logging
+
 from app.config import MCPConfig, MCPServerConfig
 from tests.factories import make_capabilities_doc, make_mcp_server, make_settings
 
 import app.config as app_config
+import app.services.llm_auth as llm_auth
 import app.services.tts_client as tts_client
 
 TTS_BASE = "http://tts.local:5500"
@@ -432,3 +435,56 @@ class TestUpdateTTSParameters:
         assert resp.status_code == 422
         # The doc still describes the live server: keep it.
         assert tts_client.cached_capabilities() == (TTS_BASE, doc)
+
+
+class TestApiKeyIsolation:
+    """The LLM API key (docs/feature_api_key.md) is resolved outside
+    AppSettings — it must never appear in the settings API, in
+    settings.yaml on disk, or in the LLM section's shape."""
+
+    def test_api_key_never_in_settings_response_or_yaml(self, client, monkeypatch, tmp_path):
+        sentinel = "sk-secret-settings-test"
+        # GIVEN a configured API key (env var):
+        monkeypatch.setenv(llm_auth.ENV_VAR_NAME, sentinel)
+        llm_auth.invalidate_llm_api_key()
+
+        # WHEN the settings are read AND saved (save re-serializes the
+        # whole config to settings.yaml):
+        body = client.get("/api/settings").json()
+        resp = client.put("/api/settings", json=base_update())
+        assert resp.status_code == 200
+        saved_yaml = (tmp_path / "settings.yaml").read_text(encoding="utf-8")
+
+        # THEN the key is in neither the API response nor settings.yaml,
+        # and no api_key field exists anywhere in the contract:
+        assert "api_key" not in body["llm"]
+        assert sentinel not in str(body)
+        assert "api_key" not in saved_yaml
+        assert sentinel not in saved_yaml
+
+    def test_save_with_http_llm_url_logs_cleartext_warning(self, client, caplog):
+        # GIVEN the stock http:// LLM base URL from the payload:
+        with caplog.at_level(logging.WARNING):
+            # WHEN the settings are saved,
+            resp = client.put("/api/settings", json=base_update())
+
+        # THEN the save succeeds AND the cleartext warning is logged
+        # (deduped per URL by the fixture reset, so it fires here):
+        assert resp.status_code == 200
+        assert "your chats are sent in cleartext" in caplog.text
+
+    def test_save_with_https_llm_url_logs_no_cleartext_warning(self, client, monkeypatch, caplog):
+        # GIVEN the current settings pointing at an https LLM:
+        current = make_settings()
+        current.llm.base_url = "https://llm.local:8080"
+        monkeypatch.setattr(app_config, "_settings_cache", current)
+
+        # WHEN the same https URL is saved,
+        with caplog.at_level(logging.WARNING):
+            resp = client.put("/api/settings", json=base_update(
+                llm={"base_url": "https://llm.local:8080", "model": "test-model",
+                     "max_tokens": 1024, "temperature": 0.8}))
+
+        # THEN no cleartext warning is logged:
+        assert resp.status_code == 200
+        assert "cleartext" not in caplog.text

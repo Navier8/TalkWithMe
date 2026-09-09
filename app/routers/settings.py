@@ -15,7 +15,7 @@ from app.models import (
     STTSettingsResponse,
     TTSSettingsResponse,
 )
-from app.services import tts_client
+from app.services import llm, tts_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -141,6 +141,9 @@ def update_settings(req: SettingsUpdateRequest):
     )
 
     app_config.save_settings(updated)
+    # A save may have (re)introduced an http:// LLM URL: re-run the
+    # cleartext warning (deduped per URL, so an unchanged URL stays quiet).
+    llm.warn_if_plaintext_llm(updated.llm.base_url)
     # Drop the capabilities cache (slot only, no inline refetch): the save
     # may have changed the TTS base_url, and a negative cache from a server
     # that was down at startup must not outlive the save that fixed it.
