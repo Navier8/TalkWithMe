@@ -91,6 +91,33 @@ def _staged_audio_filename(message_id: str, mime_type: Optional[str]) -> str:
     return f"{message_id}_pending_{uuid.uuid4().hex[:8]}{_audio_file_extension(mime_type)}"
 
 
+def _is_plain_filename(value: Any) -> bool:
+    """True when *value* is a plain filename safe to join onto a room dir.
+
+    The "audio" arrays in history.json are hand-editable data, not trusted
+    paths: anything that is not a str, contains a path separator (either OS
+    flavour) or a NUL byte, or is "." / ".." itself, could escape the room
+    directory (or fail on directory unlink) when joined onto it.
+    """
+    return (
+        isinstance(value, str)
+        and value not in (".", "..")
+        and not any(sep in value for sep in ("/", "\\", "\x00"))
+    )
+
+
+def _find_message(data: Dict[str, Any], message_id: str) -> Optional[Dict[str, Any]]:
+    """Return the message row with the given ID from parsed history data.
+
+    Returns None when the data has no such row. Shared by persist_audio()
+    (attach-or-stage decision) and delete_message() (find-before-remove).
+    """
+    for msg in data.get("messages", []):
+        if msg["id"] == message_id:
+            return msg
+    return None
+
+
 def _read_history_file(room_name: str) -> Dict[str, Any]:
     """Load the room's history JSON (or a fresh skeleton if none exists).
 
@@ -208,14 +235,7 @@ def persist_audio(
         room.mkdir(parents=True, exist_ok=True)
 
         data = _read_history_file(room_name)
-
-        index = 0
-        msg_found = None
-        for msg in data.get("messages", []):
-            if msg["id"] == message_id:
-                index = len(msg.get("audio", []))
-                msg_found = msg
-                break
+        msg_found = _find_message(data, message_id)
 
         raw = base64.b64decode(audio_base64)
 
@@ -234,7 +254,7 @@ def persist_audio(
             )
             return filename
 
-        filename = _audio_filename(message_id, index, mime_type)
+        filename = _audio_filename(message_id, len(msg_found.get("audio", [])), mime_type)
         with open(room / filename, "wb") as f:
             f.write(raw)
         msg_found.setdefault("audio", []).append(filename)
@@ -242,6 +262,80 @@ def persist_audio(
 
     logger.debug("Persisted audio '%s' for message %s in room '%s'", filename, message_id, room_name)
     return filename
+
+
+def delete_message(room_name: str, message_id: str) -> bool:
+    """Delete a single message row and all of its audio files from a room.
+
+    The whole read-modify-write cycle runs under _HISTORY_LOCK, so the
+    delete is atomic with respect to concurrent persist_message() and
+    persist_audio() calls (the frontend fires audio uploads without
+    awaiting them, so they can race a delete).
+
+    Cleanup covers the three places files for this message can live:
+      1. the row's own "audio" array — already-attached files. Entries are
+         validated first: history.json is hand-editable, and a traversal
+         entry ("../../settings.yaml") must not let the delete walk out of
+         the room directory,
+      2. the staging registry entry for (room_name, message_id) — pre-row
+         uploads that were never attached to a row,
+      3. a directory sweep for any remaining "<message_id>_"-prefixed file
+         — files that already exist at delete time but nothing references,
+         e.g. staging files orphaned by an earlier crash (the in-memory
+         registry is lost on restart, the files are not). Message IDs are
+         UUIDv4, so the prefix can never match another message's files.
+         A persist_audio() that lands AFTER this delete runs re-stages
+         instead; its file is written after the sweep, so the sweep cannot
+         see it and it is left behind as a one-file orphan (bounded,
+         invisible in the UI, same class as the crash orphans — see
+         docs/feature_delete_message.md, Concurrency).
+
+    The room's top-level "datetime" field is left as-is: it records the
+    most recent message WRITE, and deleting an older message is not one.
+
+    Returns True when the row existed and was deleted; False when the room
+    has no message with that ID (nothing was written or removed).
+    """
+    with _HISTORY_LOCK:
+        data = _read_history_file(room_name)
+        row = _find_message(data, message_id)
+        if row is None:
+            return False
+        data["messages"].remove(row)
+
+        room = _room_dir(room_name)
+
+        # 1. Attached audio (missing_ok: a file already gone from disk is
+        #    not an error — e.g. the user deleted it by hand). Unsafe
+        #    entries are skipped, not joined: without this, a hand-edited
+        #    history.json would turn this delete into arbitrary file
+        #    deletion outside the room directory.
+        for filename in row.get("audio", []):
+            if not _is_plain_filename(filename):
+                logger.warning(
+                    "Skipping unsafe audio filename %r for message %s in "
+                    "room '%s' (hand-edited history.json?)",
+                    filename, message_id, room_name,
+                )
+                continue
+            (room / filename).unlink(missing_ok=True)
+
+        # 2. Staged (pre-row) audio: drop the registry entry and delete the
+        #    files. Best-effort — a vanished staged file changes nothing.
+        for filename in _pending_audio.pop((room_name, message_id), []):
+            (room / filename).unlink(missing_ok=True)
+
+        # 3. Prefix sweep: closes the race where a concurrent upload landed
+        #    in the staging path AFTER step 2 ran (row already gone).
+        if room.exists():
+            for item in room.iterdir():
+                if item.is_file() and item.name.startswith(f"{message_id}_"):
+                    item.unlink(missing_ok=True)
+
+        _write_history_file(room_name, data)
+
+    logger.info("Deleted message %s from room '%s'", message_id, room_name)
+    return True
 
 
 def load_history(room_name: str) -> List[Dict[str, Any]]:

@@ -278,6 +278,12 @@ class ChatMessage(BaseModel):
     content: str
     # Which persona produced this message (only set for assistant messages)
     persona: Optional[str] = None
+    # The message's persisted UUID, when known. Set by the session manager
+    # from the ID passed to add_*_message() and copied from disk by
+    # load_room(); enables ID-precise operations such as selective deletion.
+    # Optional on purpose: messages created without an ID (legacy test
+    # fixtures, in-memory-only turns) keep working unchanged.
+    id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

@@ -167,13 +167,20 @@ class TestSingleReply:
 
     def test_session_history_updated(self, client, monkeypatch):
         _stub_stream(monkeypatch, ["hi"])
-        _chat(client)
+        events = _chat(client)
 
         history = client.get("/api/session").json()["history"]
+        # The in-memory history carries the persisted message IDs (selective
+        # deletion relies on them) — the same IDs the SSE events issued.
+        start = events[0]
         assert history == [
-            {"role": "user", "content": "hello there", "persona": None},
-            {"role": "assistant", "content": "hi", "persona": "Alex"},
+            {"role": "user", "content": "hello there", "persona": None,
+             "id": start["user_message_id"]},
+            {"role": "assistant", "content": "hi", "persona": "Alex",
+             "id": start["message_id"]},
         ]
+        assert uuid.UUID(history[0]["id"])
+        assert uuid.UUID(history[1]["id"])
 
     def test_generated_user_message_id_when_absent(self, client, monkeypatch):
         _stub_stream(monkeypatch, ["hi"])

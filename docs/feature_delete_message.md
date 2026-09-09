@@ -58,9 +58,15 @@ A small delete button (a trash/✕ icon, styled after the existing
 - The button is revealed on hover of the message row (always visible on
   touch devices).
 - **Streaming persona bubbles**: the button is rendered but kept
-  disabled/hidden until the `done` event for that message. The assistant
-  row is only persisted at the end of its stream, so a delete button that
-  were visible mid-stream would have nothing to delete yet.
+  disabled/hidden until the stream settles: the `done` event on success,
+  or the `error` event for a stream that died before persisting. The
+  assistant row is only written to disk at the end of a successful
+  stream, so a button visible mid-stream would have nothing to delete
+  yet. The `error` case is deliberate, not an oversight: the 404 clause
+  in the click behavior below names a reply that "errored before
+  completion" as a deletable case, and gating on `done` alone would leave
+  such a row permanently undeletable. A click on it 404s and the handler
+  removes the row from view, so display and disk end up in agreement.
 - **Error bubbles** (`appendErrorBubble`) are not persisted and carry no
   message ID — they get no delete button.
 
@@ -119,15 +125,20 @@ cycles), so it is atomic with respect to concurrent audio uploads:
 2. Find the message row by ID. If there is no such row, return `False` —
    no write, no cleanup.
 3. Remove the row from `messages`.
-4. Drop any `_pending_audio[(room_name, message_id)]` staging-registry
+4. Delete each file named in the removed row's `audio` array, with
+   `missing_ok=True` (a hand-deleted file on disk is not an error).
+   Entries are first validated as plain filenames: `history.json` is
+   hand-editable, so a traversal entry (`../../settings.yaml`) or a
+   non-string value must be skipped with a warning rather than joined —
+   without this check the delete would be arbitrary file deletion.
+5. Drop any `_pending_audio[(room_name, message_id)]` staging-registry
    entries and best-effort delete those staged files (see Concurrency for
    why this matters).
-5. Delete each file named in the removed row's `audio` array, with
-   `missing_ok=True` (a hand-deleted file on disk is not an error).
 6. Best-effort sweep of the room directory for any other file whose name
    starts with `<message_id>_`. Message IDs are UUIDv4, so the prefix is
    unambiguous and can never match another message's files. This catches
-   staged audio for this message that is not (yet) referenced by any row.
+   files that already exist at delete time but are referenced by no row
+   (e.g. staging files orphaned by an earlier crash — see Concurrency).
 7. Write the updated history back with the existing atomic
    `_write_history_file()` (temp file + `os.replace`).
 8. Return `True`.
@@ -167,10 +178,12 @@ history list, and the deleted message simply stops being in it.
   replies that came after it stay, and the deleted text stops reaching the
   LLM from the next turn onward.
 - **Premature delete of a still-streaming persona message.** Prevented
-  twice over: the button is disabled until `done` (UI), and the endpoint
-  returns 404 while the row is not on disk (server). If both are somehow
-  bypassed, the server-side design below means the worst outcome is a
-  staged audio file that the delete itself cleans up — never a corrupt
+  twice over: the button is disabled until the stream settles — `done` on
+  success, `error` for a dead stream (UI) — and the endpoint returns 404
+  while the row is not on disk (server). If both are somehow bypassed,
+  the server-side design below means the worst outcome is a staged audio
+  orphan (cleaned up by the delete if the upload landed before it; left
+  behind if it landed after — see Concurrency) — never a corrupt
   `history.json` or a lost sibling message.
 - **Audio uploads in flight at delete time.** The frontend fires TTS/STT
   uploads without awaiting them, so one can race the delete. The
@@ -204,7 +217,7 @@ Per-file change map:
 | `app/models.py` | `ChatMessage.id: Optional[str] = None` (1 line). |
 | `app/session.py` | Stamp IDs in `add_user_message()` / `add_assistant_message()`; copy IDs in `load_room()`; new `remove_message_by_id()` (~25 LOC). |
 | `app/routers/persistence.py` | New `DELETE /api/persist/message/{room_name}/{message_id}` route (~20 LOC): call `delete_message()`, 404 on `False`, then conditionally `session.remove_message_by_id()` when the room is the current one. |
-| `static/chat.js` | `addDeleteButtonToRow(row, messageId)` helper + wiring into the four render paths: `appendUserBubble()`, `appendPersistedUserBubble()`, `appendPersistedAssistantBubble()`, and the live assistant row (button rendered on bubble creation, disabled until the `done` handler enables it). Click handler per the UI spec (~70 LOC). |
+| `static/chat.js` | `addDeleteButtonToRow(row, messageId)` helper + wiring into the four render paths: `appendUserBubble()`, `appendPersistedUserBubble()`, `appendPersistedAssistantBubble()`, and the live assistant row (button rendered on bubble creation, disabled until the `done` or `error` handler enables it). Click handler per the UI spec (~70 LOC). |
 | `static/style.css` | `.message-delete-btn` styling modeled on `.audio-play-btn`, hover-reveal on `.message-row` (~20 LOC). |
 | `AGENTS.md` | Add the endpoint to the API table (required by `test_docs.py`); a sentence in the "Chat persistence" section noting single-message deletion. |
 
@@ -214,10 +227,14 @@ An alternative design was considered in which the delete button only
 appears once *all* of a message's TTS uploads have provably settled — a
 per-message outstanding-counter in the frontend, incremented at TTS enqueue
 and decremented when each persistence upload resolves. It was rejected in
-favor of the simpler `done`-based gate plus the server-side cleanup above,
-because the lock-serialized delete, the staging-registry pop, and the
-prefix sweep already make even a premature delete safe: the worst possible
-outcome is a staged orphan file that the delete operation itself removes.
+favor of the simpler stream-settled gate (`done` on success, `error` for
+a dead stream) plus the server-side cleanup above,
+because even a premature delete is safe for everything that matters:
+the `history.json` read-modify-write stays atomic under the lock, so the
+worst possible outcome is a bounded staged-audio orphan — removed by the
+delete when the upload landed before it, left behind (one small file)
+when the upload landed after it — never a corrupt history file or a lost
+sibling message.
 The counter would have added ~40 lines of cross-file state tracking (and a
 subtle double-settle hazard around audio decode failures) to guard against
 a failure mode the backend already neutralizes.
@@ -263,6 +280,10 @@ complete, and the suite must end all green with no skips.
 - an orphan file matching the `<message_id>_` prefix but absent from the
   `audio` array is also deleted by the sweep.
 - an `audio` entry whose file is missing on disk does not raise.
+- hand-crafted unsafe `audio` entries in a `history.json` row (path
+  traversal, bare "." / "..", non-string values) are skipped with a
+  warning: the row is still deleted, safe sibling entries still removed,
+  and no file outside the room directory is touched.
 - returns `True` on a successful delete.
 - concurrency: `delete_message` racing `persist_audio` / `persist_message`
   from threads causes no lost updates or corrupt `history.json`
@@ -301,22 +322,40 @@ follow-up, not a requirement of this feature.
 All access to a room's `history.json` — including the new delete — is
 serialized through `app/persistence.py`'s `_HISTORY_LOCK`, and writes go
 through the atomic temp-file + `os.replace` path. The one real race is an
-audio upload in flight (the frontend fires them without awaiting) at the
-moment a message is deleted. Both interleavings are safe:
+audio upload in flight (the frontend fires them without awaiting — TTS
+uploads land *after* the `done` event that enables the delete button, so
+"delete the last reply while its audio is still uploading" is the normal
+flow, not an exotic one) at the moment a message is deleted. Because the
+lock runs every upload and the delete to completion without interleaving,
+there are exactly two orderings — an upload can never be mid-write while
+the delete's sweep runs:
 
-- **Upload lands before the delete.** The delete re-reads `history.json`
-  under the lock, sees the just-appended audio entry, and unlinks the file.
-  Nothing survives.
-- **Delete lands before the upload.** The row is already gone, so
-  `persist_audio` takes its staging path: it writes a
+- **Upload lands before the delete.** Fully clean. The delete re-reads
+  `history.json` under the lock and sees the upload's result: if the row
+  existed, the file was attached to the row's `audio` array and the
+  delete unlinks it (step 1); if the row did not exist yet, the file was
+  staged and registered in `_pending_audio`, and the delete pops the
+  registry entry and unlinks it (step 2). Nothing survives.
+- **Delete lands before the upload.** The row is already gone, so the
+  late `persist_audio()` takes the staging path: it writes a
   `<message_id>_pending_<hex8>.<ext>` file and registers it in
-  `_pending_audio`. The row will never be recreated, so without extra
-  handling that file would become an orphan. `delete_message` therefore
-  pops the message's staging-registry entries (deleting those files
-  best-effort) and sweeps the room directory for any
-  `<message_id>_`-prefixed file, so the orphan window is closed.
+  `_pending_audio` — *after* the delete's sweep has run, so the sweep
+  cannot see it. The row is never recreated, so the file (and its
+  registry entry, until process restart) is left behind as an orphan.
+  The residue is bounded (one file per late upload), invisible in the UI
+  (no row references it), and the same class as the pre-existing crash
+  orphans scoped out in *Old orphaned audio* above. Closing it would
+  require a deleted-ID tombstone that `persist_audio()` consults —
+  considered, and not worth the extra state for a small, invisible leak.
 
-Because message IDs are UUIDv4, the prefix sweep can never touch another
-message's files. The net guarantee: a delete is atomic with respect to
-concurrent uploads, and the only residue a race can produce is a file the
-delete itself removes.
+The directory sweep (step 3) therefore covers a different case than the
+late-upload ordering above: files that *already exist* at delete time
+but are referenced by nothing — e.g. staging files orphaned by a crash
+(the in-memory registry is lost on restart, the files are not). Because
+message IDs are UUIDv4, the sweep's `<message_id>_` prefix can never
+match another message's files.
+
+The net guarantee: a delete is atomic with respect to concurrent uploads
+for `history.json` itself — no lost updates, no corrupt file, no lost
+sibling message — and the only residue a race can produce is a staged
+orphan file when an upload lands after the delete.
