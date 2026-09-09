@@ -195,6 +195,7 @@ Chat rooms are stored in `chatrooms.yaml` and managed via `get_chatrooms()` / `s
 | `POST` | `/api/persist/audio?room=<room>` | Upload base64 audio for a persisted message |
 | `GET` | `/api/persist/audio/{room_name}/{filename}` | Serve a persisted audio file for playback |
 | `DELETE` | `/api/persist/message/{room_name}/{message_id}` | Delete one persisted message and all of its audio files (row + attached, staged, and prefix-orphaned files under the history lock); also removes the in-memory session entry when the room is the current one. 404 when the room has no message with that ID |
+| `GET` | `/api/persist/history/{room_name}` | Persisted message count for a room (`{room, message_count}`); read-only — unlike `load-room` it does NOT switch the session to the room. Used by the room-deletion confirmation to warn about history that will be deleted. 422 for names outside the room-name alphabet |
 | `GET` | `/api/tts/health` | TTS availability status |
 | `POST` | `/api/tts` | Proxy text → TTS `/synthesize`; returns `{audio_base64, sample_rate}` |
 | `GET` | `/api/tts/capabilities` | TTS server capabilities document (raw, no wrapper); 503 when TTS is inactive or unreachable. Optional `?base_url=<url>` probes a specific (possibly unsaved) url: 422 on a scheme-less url, 503 when unreachable, never touches the cached doc |

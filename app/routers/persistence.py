@@ -16,6 +16,7 @@ from app.persistence import (
     _PERSISTENCE_ROOT,
     _is_plain_filename,
     delete_message,
+    load_history,
     persist_audio,
 )
 from app.session import session
@@ -115,3 +116,17 @@ def delete_message_endpoint(room_name: str, message_id: str):
         session.remove_message_by_id(message_id)
 
     return {"status": "deleted"}
+
+
+@router.get("/history/{room_name}")
+def room_history_count(room_name: str):
+    """Return the number of persisted messages for a room.
+
+    Read-only on purpose: the frontend's room-deletion confirmation uses it
+    to warn about the history that is about to be deleted. The natural
+    alternative, GET /api/session/load-room/{room_name}, cannot serve that
+    job — it also switches the backend session to the room, which would
+    reset the user's active session when the deletion goes ahead.
+    """
+    _require_valid_room_name(room_name)
+    return {"room": room_name, "message_count": len(load_history(room_name))}

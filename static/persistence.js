@@ -27,6 +27,28 @@ async function loadPersistedHistory(roomName) {
     }
 }
 
+/**
+ * Get the number of persisted messages for a room WITHOUT switching the
+ * backend session. loadPersistedHistory() uses /api/session/load-room,
+ * which makes the room the session's current room — the wrong side effect
+ * for something as throwaway as a confirm dialog.
+ * Returns null when the count can't be determined.
+ */
+async function getRoomMessageCount(roomName) {
+    try {
+        const resp = await fetch(`/api/persist/history/${encodeURIComponent(roomName)}`);
+        if (!resp.ok) {
+            console.warn(`Failed to load message count for room '${roomName}': HTTP ${resp.status}`);
+            return null;
+        }
+        const data = await resp.json();
+        return data.message_count;
+    } catch (err) {
+        console.error("Failed to load message count:", err);
+        return null;
+    }
+}
+
 /* ==========================================================================
     Audio upload
     ========================================================================== */

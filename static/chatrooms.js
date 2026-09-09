@@ -386,8 +386,19 @@ async function createChatRoom() {
     }
 }
 
-function confirmDeleteChatRoom(name) {
-    crConfirmMsg.textContent = `Delete chat room "${name}"? Personas will not be deleted, only unassigned from this room.`;
+async function confirmDeleteChatRoom(name) {
+    // Warn about the persisted conversation only when the room actually
+    // has one. The count comes from a read-only endpoint — loadPersistedHistory
+    // would switch the backend session to the room being deleted. If the
+    // count can't be determined, warn anyway: a missed warning about
+    // deleted data is worse than a redundant one.
+    const count = await getRoomMessageCount(name);
+    let message = `Delete chat room "${name}"? Personas will not be deleted, only unassigned from this room.`;
+    if (count === null || count > 0) {
+        const detail = count !== null ? ` (${count} message${count === 1 ? "" : "s"})` : "";
+        message += ` The room's saved conversation history and audio${detail} will be permanently deleted.`;
+    }
+    crConfirmMsg.textContent = message;
     crConfirmOverlay.classList.remove("hidden");
 
     const deleteBtn = document.getElementById("cr-confirm-delete");

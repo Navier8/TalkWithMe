@@ -231,6 +231,42 @@ class TestDeleteMessage:
         assert [m["id"] for m in _load_messages(None, "TNG")] == ["msg-1"]
 
 
+class TestRoomHistoryCount:
+    def test_returns_persisted_message_count(self, client):
+        persist_message("TNG", ChatMessage(role="user", content="one"), "msg-1")
+        persist_message("TNG", ChatMessage(role="assistant", content="two",
+                                           persona="Alex"), "msg-2")
+
+        resp = client.get("/api/persist/history/TNG")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"room": "TNG", "message_count": 2}
+
+    def test_room_without_history_returns_zero(self, client):
+        resp = client.get("/api/persist/history/TNG")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"room": "TNG", "message_count": 0}
+
+    def test_read_only_does_not_touch_the_session(self, client):
+        # The whole point of this endpoint: probing a room's history must
+        # not switch the session to it (unlike load-room):
+        persist_message("TNG", ChatMessage(role="user", content="one"), "msg-1")
+        session.set_current_room("default")
+
+        resp = client.get("/api/persist/history/TNG")
+
+        assert resp.status_code == 200
+        assert session.current_room == "default"
+        assert [m.id for m in session.history] == []
+
+    def test_invalid_room_name_returns_422(self, client):
+        # Dots are not in the room-name alphabet — also blocks traversal:
+        resp = client.get("/api/persist/history/bad..room")
+
+        assert resp.status_code == 422
+
+
 def _load_messages(persistence_root, room: str):
     from app.persistence import load_history
 
