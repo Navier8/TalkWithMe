@@ -476,8 +476,9 @@ function addDeleteButtonToRow(row, messageId, disabled = false) {
 
     const btn = document.createElement("button");
     btn.className = "message-delete-btn";
-    btn.innerHTML = "\u{1F5D1}"; // trash icon
+    btn.textContent = "\u{1F5D1}"; // trash icon
     btn.title = "Delete message";
+    btn.setAttribute("aria-label", "Delete message");
     btn.disabled = disabled;
     btn.addEventListener("click", () => deleteMessageFromChat(row, messageId));
     container.appendChild(btn);
