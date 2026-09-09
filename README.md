@@ -25,7 +25,7 @@ Follow the development of this app on my YouTube channel:
 - Optional TTS: AI responses spoken aloud via a TTS server
 - Optional STT: Click the microphone icon to speak your prompt
 - Optional MCP tools: let any persona call tools served by MCP servers (e.g. fetch web pages, run queries)
-- Fully local — no internet required, no authentication
+- Fully local — no internet required, no authentication. You can connect to remote LLMs with an API key if you wish, but TalkWithMe can be run 100% locally. NOTE: only connect to remote LLMs that you trust.
 - Theme chooser in the top-right: Dark (default), Light, Matrix, and Blues
 - Each room persists its text and audio messages
 
@@ -121,6 +121,38 @@ configuration here is the LLM.
 
 The `mcp` section currently has no UI — it is edited in `settings.yaml` directly and only
 read on startup (restart the app after changes).
+
+### LLM API key (remote LLMs)
+
+TalkWithMe was built assuming a local LLM that needs no credentials. If your LLM is
+remote (OpenAI, Groq, a hosted server with auth, ...), you can optionally configure
+an API key. The key is deliberately **not** in `settings.yaml` (that file is tracked
+in git) — it is resolved once at startup from two sources, in priority order:
+
+1. the `TALKWITHME_LLM_API_KEY` environment variable (the raw key value; wins over the file)
+2. an `llm_api_key` file in the project root (`llm_api_key = <your key>`)
+
+If neither is set, no key is sent and everything works exactly as before. When
+configured, every LLM request carries an `Authorization: Bearer <key>` header.
+
+To use the file, copy the example and fill in your key:
+
+```bash
+cp llm_api_key.example llm_api_key
+# edit llm_api_key and replace your_key_here
+chmod 600 llm_api_key    # recommended: keep the key readable only by you
+```
+
+Notes and gotchas:
+
+- `llm_api_key` is git-ignored; only `llm_api_key.example` is committed.
+- The key is never shown in the UI, cannot be viewed or changed at runtime, and is
+  never logged — the startup log reports only *whether* a key is configured, not its
+  value.
+- Changing the key requires a restart.
+- If your LLM `base_url` uses `http://` instead of `https://`, the app logs a
+  warning: your chats (and the API key) are sent in cleartext.
+- Note that using a remote LLM may incur usage costs.
 
 ### Dynamic TTS parameters
 
@@ -325,6 +357,8 @@ By default, only one AI persona in the current chat room will answer your prompt
 ## MCP tools (optional)
 
 If you want your personas to be able to *do* things — fetch a web page, query a database, check the weather — you can connect one or more [MCP (Model Context Protocol)](https://modelcontextprotocol.io) servers. When a persona with tools enabled replies, TalkWithMe runs an agentic loop: the LLM may request tool calls, TalkWithMe executes them against the configured MCP servers, feeds the results back to the LLM, and repeats until the LLM produces a final text answer.
+
+Be careful connecting MCP servers, especially if you are connecting to a remote LLM. You are giving the LLM the ability to execute arbitrary tools, which might be a privacy or security concern.
 
 ## Persona memories
 
@@ -546,6 +580,7 @@ standalone script under `impl/` with per-engine install notes.
   - Dynamic UI for TTS server configuration via `tts-serve` (#86)
   - Allow deletion of individual messages in a chat (#99)
   - Bug fix: two chatroom deletion issues (#105)
+  - Add API key option for LLM connections (#100)
 
 ## License
 

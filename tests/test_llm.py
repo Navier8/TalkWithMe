@@ -6,11 +6,13 @@ no network access is involved.
 
 import asyncio
 import json
+import logging
 
 import pytest
 
 import app.config as app_config
 import app.services.llm as llm
+import app.services.llm_auth as llm_auth
 from app.config import Persona
 from app.services import builtin
 from tests.factories import (
@@ -53,7 +55,13 @@ def finish_line(reason: str) -> str:
 
 
 def patch_llm_client(monkeypatch, client: FakeLLMClient):
-    monkeypatch.setattr(llm.httpx, "AsyncClient", lambda *a, **kw: client)
+    def _factory(*args, **kwargs):
+        # Record the constructor kwargs (timeout, headers) of every client
+        # build so tests can assert on them (e.g. the API key header).
+        client.client_kwargs.update(kwargs)
+        return client
+
+    monkeypatch.setattr(llm.httpx, "AsyncClient", _factory)
 
 
 def _run_until_complete(aw):
@@ -167,6 +175,109 @@ class TestChatCompletion:
         patch_llm_client(monkeypatch, Down([]))
         result = _run(llm.chat_completion([{"role": "user", "content": "pick"}]))
         assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# API key (docs/feature_api_key.md)
+# ---------------------------------------------------------------------------
+
+class TestLlmClientHeaders:
+    """The optional Authorization: Bearer header on LLM calls."""
+
+    def test_stream_chat_sends_bearer_header_when_key_from_env(self, monkeypatch):
+        # GIVEN an API key in the environment:
+        monkeypatch.setenv(llm_auth.ENV_VAR_NAME, "sk-test-123")
+        llm_auth.invalidate_llm_api_key()
+        client = FakeLLMClient([token_line("x"), "data: [DONE]"])
+        patch_llm_client(monkeypatch, client)
+
+        # WHEN a streamed chat request is made,
+        _collect(llm.stream_chat([{"role": "user", "content": "hi"}]))
+
+        # THEN the client carries the Bearer header:
+        assert client.client_kwargs["headers"] == {"Authorization": "Bearer sk-test-123"}
+
+    def test_chat_completion_sends_bearer_header_when_key_from_file(self, monkeypatch, tmp_path):
+        # GIVEN a key file in the (tmp) project root — the autouse fixture
+        # points llm_auth._PROJECT_ROOT at this same tmp_path:
+        (tmp_path / llm_auth.KEY_FILENAME).write_text(
+            "# a comment line\nllm_api_key = sk-file-456\n", encoding="utf-8",
+        )
+        llm_auth.invalidate_llm_api_key()
+        resp = json_response(200, {"choices": [{"message": {"content": "Luna"}}]})
+        client = FakeLLMClient([], post_response=resp)
+        patch_llm_client(monkeypatch, client)
+
+        # WHEN a non-streaming router call is made,
+        _run(llm.chat_completion([{"role": "user", "content": "pick"}], max_tokens=16))
+
+        # THEN the client carries the Bearer header:
+        assert client.client_kwargs["headers"] == {"Authorization": "Bearer sk-file-456"}
+
+    def test_stream_chat_sends_no_auth_header_without_key(self, monkeypatch):
+        # GIVEN no env var and no key file (the fixture defaults):
+        monkeypatch.delenv(llm_auth.ENV_VAR_NAME, raising=False)
+        llm_auth.invalidate_llm_api_key()
+        client = FakeLLMClient([token_line("x"), "data: [DONE]"])
+        patch_llm_client(monkeypatch, client)
+
+        # WHEN a streamed chat request is made,
+        _collect(llm.stream_chat([{"role": "user", "content": "hi"}]))
+
+        # THEN no Authorization header is sent at all:
+        assert client.client_kwargs.get("headers") is None
+
+    def test_api_key_never_reaches_the_log(self, monkeypatch, caplog):
+        # GIVEN a sentinel key in the environment:
+        monkeypatch.setenv(llm_auth.ENV_VAR_NAME, "sk-secret-do-not-log")
+        llm_auth.invalidate_llm_api_key()
+        client = FakeLLMClient([token_line("x"), "data: [DONE]"])
+        patch_llm_client(monkeypatch, client)
+
+        # WHEN the key is loaded and a request is made,
+        with caplog.at_level(logging.INFO):
+            _collect(llm.stream_chat([{"role": "user", "content": "hi"}]))
+
+        # THEN no log record contains the key value:
+        assert "sk-secret-do-not-log" not in caplog.text
+
+
+class TestWarnIfPlaintextLlm:
+    """The once-per-URL cleartext warning for http:// LLM endpoints."""
+
+    def test_http_url_logs_cleartext_warning(self, caplog):
+        # GIVEN a plain-http LLM base URL,
+        with caplog.at_level(logging.WARNING):
+            # WHEN the warning check runs,
+            llm.warn_if_plaintext_llm("http://llm.local:8080")
+        # THEN the exact warning is logged:
+        assert "Warning: your LLM connection uses http; your chats are sent in cleartext." in caplog.text
+
+    def test_https_url_logs_nothing(self, caplog):
+        # GIVEN an https LLM base URL,
+        with caplog.at_level(logging.WARNING):
+            llm.warn_if_plaintext_llm("https://llm.local:8080")
+        # THEN no cleartext warning is logged:
+        assert "cleartext" not in caplog.text
+
+    def test_none_or_blank_url_logs_nothing(self, caplog):
+        # GIVEN a missing or blank base URL,
+        with caplog.at_level(logging.WARNING):
+            llm.warn_if_plaintext_llm(None)
+            llm.warn_if_plaintext_llm("   ")
+        # THEN nothing is logged:
+        assert "cleartext" not in caplog.text
+
+    def test_warning_is_logged_once_per_distinct_url(self, caplog):
+        # GIVEN several http base URLs, two of them identical,
+        with caplog.at_level(logging.WARNING):
+            llm.warn_if_plaintext_llm("http://a.local:1")
+            llm.warn_if_plaintext_llm("http://a.local:1")  # duplicate: deduped
+            llm.warn_if_plaintext_llm("http://b.local:2")
+
+        # THEN one warning per distinct URL:
+        warnings = [r for r in caplog.records if "cleartext" in r.getMessage()]
+        assert len(warnings) == 2
 
 
 # ---------------------------------------------------------------------------

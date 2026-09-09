@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 from app import config as app_config
 from app.routers import chat, chatrooms, personas, persistence, session as session_router, settings, stt, tts
 from app.session import session
+from app.services import llm, llm_auth
 from app.services.tool_registry import get_all_tools, load_tools
 from app.services.tts_client import ensure_capabilities
 
@@ -84,6 +85,13 @@ async def lifespan(app: FastAPI):
     settings = app_config.load_settings()
     app_config.load_chatrooms()
 
+    # Resolve the LLM API key once (env var, then llm_api_key file). It is
+    # deliberately not part of settings.yaml (that file is tracked in git)
+    # and is not reloadable at runtime — a restart is required (docs/
+    # feature_api_key.md). Also warn when the LLM URL is plain http.
+    llm_auth.load_llm_api_key()
+    llm.warn_if_plaintext_llm(settings.llm.base_url)
+
     # Warm the TTS capabilities cache (best-effort; ensure_capabilities
     # never raises, so a down TTS server cannot break startup). Imported
     # into this module's namespace so tests can monkeypatch it the same
@@ -94,7 +102,12 @@ async def lifespan(app: FastAPI):
     all_names = [p.name for p in personas_cfg.personas]
     session.set_active_personas(all_names)
     logger.info("TalkWithMe started with %d personas: %s", len(all_names), all_names)
-    logger.info("LLM endpoint: %s", settings.llm.base_url)
+    # "configured"/"not configured" only — the key itself never reaches the log.
+    logger.info(
+        "LLM endpoint: %s (API key: %s)",
+        settings.llm.base_url,
+        "configured" if llm_auth.get_llm_api_key() else "not configured",
+    )
     logger.info("TTS active: %s (endpoint: %s)", settings.tts.is_active, settings.tts.base_url)
     logger.info("STT active: %s (endpoint: %s)", settings.stt.is_active, settings.stt.base_url)
 

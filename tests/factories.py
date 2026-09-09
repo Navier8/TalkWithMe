@@ -1106,6 +1106,9 @@ class FakeLLMClient:
     `lines` is the list of SSE lines served for every streamed request;
     `payloads` records the JSON payload of each request. For non-streaming
     calls, pass `post_response` (used by chat_completion).
+    `client_kwargs` records the constructor kwargs (timeout, headers) of
+    the most recent httpx.AsyncClient build, so tests can assert on them
+    (e.g. the Authorization header — see test_llm.py's patch_llm_client).
     """
 
     def __init__(
@@ -1118,6 +1121,7 @@ class FakeLLMClient:
         self.lines = lines
         self.post_response = post_response
         self.payloads: List[dict] = []
+        self.client_kwargs: dict = {}
 
     async def __aenter__(self):
         return self

@@ -1,0 +1,7 @@
+# If your LLM requires an API key to connect,
+# rename this file to llm_api_key and fill
+# in the value below.
+#
+# Alternatively, you can specify the key
+# in the env var TALKWITHME_LLM_API_KEY
+llm_api_key = your_key_here
