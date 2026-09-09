@@ -458,6 +458,38 @@ class TestClearRoom:
         persistence.clear_room("never-existed")  # must not raise
 
 
+# ---------------------------------------------------------------------------
+# delete_room
+# ---------------------------------------------------------------------------
+
+class TestDeleteRoom:
+    def test_delete_room_removes_the_directory_and_all_its_contents(self):
+        persistence.persist_message("room1", ChatMessage(role="user", content="a"), "id-1")
+        persistence.persist_audio("room1", "id-1", B64_AUDIO, "audio/webm")
+        room_dir = persistence_root_path() / "room1"
+        assert room_dir.exists()
+        assert len(list(room_dir.iterdir())) == 2
+
+        persistence.delete_room("room1")
+
+        assert not room_dir.exists()
+
+    def test_delete_room_drops_staged_audio_from_registry(self):
+        staged = persistence.persist_audio("room1", "m-1", B64_AUDIO, "audio/webm")
+        assert (persistence_root_path() / "room1" / staged).exists()
+
+        persistence.delete_room("room1")
+
+        # Staged file is gone from disk...
+        assert not (persistence_root_path() / "room1" / staged).exists()
+        # ...and a subsequent row for the same ID must not resurrect it.
+        persistence.persist_message("room1", ChatMessage(role="user", content="hi"), "m-1")
+        assert persistence.load_history("room1")[0]["audio"] == []
+
+    def test_delete_room_missing_room_is_a_noop(self):
+        persistence.delete_room("never-existed")  # must not raise
+
+
 def persistence_root_path():
     """The (patched) persistence root for this test run."""
     return persistence._PERSISTENCE_ROOT

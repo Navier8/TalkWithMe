@@ -6,11 +6,11 @@ messages (row + audio) from a room.
 """
 
 import logging
-import re
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
+from app.config import is_valid_room_name
 from app.models import AudioUploadRequest
 from app.persistence import (
     _PERSISTENCE_ROOT,
@@ -23,13 +23,6 @@ from app.session import session
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/persist", tags=["persistence"])
 
-# The same room-name alphabet the room-creation endpoint validates with
-# (letters, digits, spaces, hyphens, underscores). Re-checking it here keeps
-# a hostile or typo'd room segment from escaping the room's persistence
-# directory via path traversal. Dots are the tell: ".." is the traversal
-# token, and room names never need it.
-_ROOM_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9 _-]+$")
-
 
 def _require_valid_room_name(room_name: str) -> None:
     """Raise 422 when *room_name* is outside the room-name alphabet.
@@ -39,7 +32,7 @@ def _require_valid_room_name(room_name: str) -> None:
     legal single path segment — only an alphabet check can stop them from
     being joined onto _PERSISTENCE_ROOT.
     """
-    if not _ROOM_NAME_PATTERN.match(room_name):
+    if not is_valid_room_name(room_name):
         raise HTTPException(
             status_code=422,
             detail="Room name may only contain letters, numbers, spaces, hyphens, and underscores.",

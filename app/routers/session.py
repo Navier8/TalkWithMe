@@ -3,9 +3,9 @@
 import logging
 import uuid
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
-from app.config import get_personas
+from app.config import get_personas, is_valid_room_name
 from app.models import SessionPersonasRequest, SessionState, PersistedHistoryResponse, PersistedMessage
 from app.persistence import load_history_with_metadata
 from app.session import session
@@ -57,6 +57,14 @@ def load_room(room_name: str):
     Used when switching chat rooms. Clears any existing in-memory history
     and populates from the room's persisted data.
     """
+    # The room name flows into persistence paths AND becomes the session's
+    # current room (which a later "New Chat" feeds to clear_room()), so
+    # anything outside the room-name alphabet is a traversal attempt:
+    if not is_valid_room_name(room_name):
+        raise HTTPException(
+            status_code=422,
+            detail="Room name may only contain letters, numbers, spaces, hyphens, and underscores.",
+        )
     session.load_room(room_name)
     metadata = load_history_with_metadata(room_name)
     return PersistedHistoryResponse(

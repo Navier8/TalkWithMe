@@ -545,6 +545,7 @@ standalone script under `impl/` with per-engine install notes.
 - **Work in progress, update with release date when ready** v7.0
   - Dynamic UI for TTS server configuration via `tts-serve` (#86)
   - Allow deletion of individual messages in a chat (#99)
+  - Bug fix: two chatroom deletion issues (#105)
 
 ## License
 

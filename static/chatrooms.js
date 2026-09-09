@@ -404,11 +404,17 @@ async function deleteChatRoom(name) {
             console.error("Delete chat room failed:", resp.status);
             return;
         }
-        // If we deleted the currently selected room, switch back to default
-        if (currentChatRoom === name) {
-            currentChatRoom = "default";
-        }
+        // loadChatRooms() below reverts currentChatRoom to "default" on its
+        // own once the room vanishes from the list, but that only updates
+        // the dropdown — the chat panel would keep showing the deleted
+        // room's messages. switchChatRoom() does the full job: clear the
+        // panel, load default's persisted history (which also resets the
+        // backend session), and re-apply the room filter.
+        const deletedActiveRoom = currentChatRoom.toLowerCase() === name.toLowerCase();
         await loadChatRooms();
+        if (deletedActiveRoom) {
+            await switchChatRoom("default");
+        }
         renderChatRoomList();
     } catch (err) {
         console.error("Delete chat room error:", err);

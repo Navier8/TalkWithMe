@@ -6,16 +6,17 @@ edited, or deleted via this API.
 """
 
 import logging
-import re
 from typing import List
 
 from fastapi import APIRouter, HTTPException
 
+from app import persistence
 from app.config import (
     ChatRoom,
     ChatRoomsConfig,
     get_chatrooms,
     get_personas,
+    is_valid_room_name,
     save_chatrooms,
 )
 from app.models import (
@@ -24,6 +25,7 @@ from app.models import (
     ChatRoomResponse,
     EchoChamberRequest,
 )
+from app.session import session
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chatrooms", tags=["chatrooms"])
@@ -69,7 +71,7 @@ def create_chatroom(req: ChatRoomCreateRequest):
             status_code=409,
             detail=f"'{DEFAULT_ROOM}' is a reserved chat room name and cannot be created.",
         )
-    if not re.match(r'^[a-zA-Z0-9 _-]+$', name):
+    if not is_valid_room_name(name):
         raise HTTPException(
             status_code=422,
             detail="Room name may only contain letters, numbers, spaces, hyphens, and underscores.",
@@ -89,7 +91,16 @@ def create_chatroom(req: ChatRoomCreateRequest):
 
 @router.delete("/{name}", status_code=204)
 def delete_chatroom(name: str):
-    """Delete a chat room. The 'default' room cannot be deleted."""
+    """Delete a chat room. The 'default' room cannot be deleted.
+
+    Deleting a room also removes its persisted history and audio: the
+    persistence directory is named after the room, so leaving it behind
+    would let a re-created room with the same name resurrect the deleted
+    room's conversation. When the deleted room was the session's active
+    room, the session is reset to 'default' — otherwise it would keep
+    pointing at a room that no longer exists, and the next message would
+    recreate the deleted room's directory behind the user's back.
+    """
     if name.lower() == DEFAULT_ROOM:
         raise HTTPException(
             status_code=400,
@@ -97,14 +108,27 @@ def delete_chatroom(name: str):
         )
 
     config = get_chatrooms()
-    if not any(r.name.lower() == name.lower() for r in config.chat_rooms):
+    # The canonical room name (from the config) is what names the
+    # persistence directory on disk — the URL spelling may differ in case,
+    # and directory names are case-sensitive.
+    room = next((r for r in config.chat_rooms if r.name.lower() == name.lower()), None)
+    if room is None:
         raise HTTPException(status_code=404, detail=f"Chat room '{name}' not found.")
 
+    # The YAML save goes first: if it fails, nothing else has been touched
+    # and the room is still fully intact on both sides.
     save_chatrooms(
         ChatRoomsConfig(
-            chat_rooms=[r for r in config.chat_rooms if r.name.lower() != name.lower()]
+            chat_rooms=[r for r in config.chat_rooms if r.name.lower() != room.name.lower()]
         )
     )
+
+    persistence.delete_room(room.name)
+
+    if session.current_room.lower() == room.name.lower():
+        # Mirrors a normal room switch: point the session at 'default' and
+        # load that room's persisted history into memory.
+        session.load_room(DEFAULT_ROOM)
 
 
 @router.get("/{name}", response_model=ChatRoomResponse)
