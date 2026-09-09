@@ -113,7 +113,7 @@ def _find_message(data: Dict[str, Any], message_id: str) -> Optional[Dict[str, A
     (attach-or-stage decision) and delete_message() (find-before-remove).
     """
     for msg in data.get("messages", []):
-        if msg["id"] == message_id:
+        if msg.get("id") == message_id:
             return msg
     return None
 
