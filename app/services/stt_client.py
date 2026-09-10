@@ -7,6 +7,7 @@ a warning and returns None to the caller.
 
 import logging
 import mimetypes
+import time
 from typing import Optional
 
 import httpx
@@ -73,11 +74,17 @@ async def transcribe_audio(audio_bytes: bytes, mime_type: str = "audio/webm") ->
         "response_format": "json",
     }
 
+    started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=settings.stt.timeout) as client:
             resp = await client.post(url, files=files, data=data)
             resp.raise_for_status()
             json_response = resp.json()
+            if settings.general.debug_latency:
+                logger.info(
+                    "[latency] STT transcription: %.0f ms (%d bytes of %s audio)",
+                    (time.monotonic() - started) * 1000, len(audio_bytes), mime_type,
+                )
             text = json_response.get("text") or "No response received from STT server"
             return {
                 "text": text,

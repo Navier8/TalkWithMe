@@ -20,6 +20,9 @@ let ttsStreaming = false;
 let ttsServerType = "";
 let sttAvailable = false;
 let isStreaming = false;
+// Diagnostic: log a per-stage STT→LLM→TTS latency breakdown to the
+// console. Mirrors general.debug_latency in settings.yaml (see latency.js).
+let debugLatencyEnabled = false;
 
 // Chat room state
 let currentChatRoom = "default";
@@ -157,3 +160,4 @@ const gsfPersonaNameMentions = document.getElementById("gsf-persona-name-mention
 const gsfMaxTurnsForContext = document.getElementById("gsf-max-turns-for-context");
 const gsfShowToolCalls = document.getElementById("gsf-show-tool-calls");
 const gsfEnablePersonaMemories = document.getElementById("gsf-enable-persona-memories");
+const gsfDebugLatency = document.getElementById("gsf-debug-latency");

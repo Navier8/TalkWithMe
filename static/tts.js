@@ -51,12 +51,14 @@ async function processAudioQueue() {
     try {
         const audioBuffer = await fetchTTS(item.personaName, item.text, item.messageId);
         if (audioBuffer) {
+            latency.mark("ttsFirstAudio");
             await playAudio(audioBuffer);
         }
     } catch (err) {
         console.warn("TTS playback error:", err);
     } finally {
         isPlayingAudio = false;
+        latency.maybeFinish();
         setTimeout(() => processAudioQueue(), 100);
     }
 }
@@ -123,6 +125,7 @@ async function processTTSRequests() {
         console.warn("TTS streaming fetch error:", err);
     } finally {
         isFetchingTTS = false;
+        latency.maybeFinish();  // covers a fetch that produced no audio to play
         // Immediately fetch the next sentence if one is waiting
         setTimeout(() => processTTSRequests(), 0);
     }
@@ -139,6 +142,7 @@ async function processAudioBufferQueue() {
 
     const buffer = audioBufferQueue.shift();
     try {
+        latency.mark("ttsFirstAudio");
         await playAudio(buffer);
         await new Promise(resolve => setTimeout(resolve, 80)); // brief inter-sentence gap
     } catch (err) {
@@ -146,6 +150,7 @@ async function processAudioBufferQueue() {
     } finally {
         isPlayingAudioBuffer = false;
         processAudioBufferQueue();
+        latency.maybeFinish();
     }
 }
 
@@ -163,6 +168,7 @@ async function processAudioBufferQueue() {
  *   regardless of when this fetch resolves.
  */
 async function fetchTTS(personaName, text, messageId) {
+    latency.mark("ttsFirstReq");
     const resp = await fetch("/api/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

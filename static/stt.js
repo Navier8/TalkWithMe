@@ -57,6 +57,8 @@ async function toggleMicrophone() {
             return;
         }
         let sttFailed = false;
+        // Start of the voice round-trip: mic just stopped, transcription begins now.
+        latency.begin("voice");
         try {
             const resp = await fetch("/api/stt", {
                 method: "POST",
@@ -68,10 +70,12 @@ async function toggleMicrophone() {
                 console.error("STT request failed:", resp.status);
                 appendErrorBubble("Unable to process STT data.");
                 sttFailed = true;
+                latency.cancel();
                 return;
             }
 
             const data = await resp.json();
+            latency.mark("sttDone");
             if (data.text) {
                 // Append transcribed text (never replace existing content)
                 const existing = inputEl.value;
@@ -96,11 +100,14 @@ async function toggleMicrophone() {
                     console.warn("Failed to persist STT audio:", err);
                 }
                 sendMessage();
+            } else {
+                latency.cancel();
             }
         } catch (err) {
             console.error("STT error:", err);
             appendErrorBubble("Unable to process STT data.");
             sttFailed = true;
+            latency.cancel();
         } finally {
             if (!sttFailed) micBtn.disabled = false;
         }

@@ -45,6 +45,7 @@ class TestGetSettings:
             "max_turns_for_context": 6,
             "show_tool_calls": True,
             "enable_persona_memories": True,
+            "debug_latency": False,
         }
 
 
@@ -119,6 +120,7 @@ class TestUpdateSettings:
             "max_turns_for_context": 12,      # preserved
             "show_tool_calls": False,         # updated
             "enable_persona_memories": False, # preserved
+            "debug_latency": False,           # preserved (default)
         }
 
     def test_missing_general_section_preserves_everything(self, client, monkeypatch):
@@ -144,6 +146,7 @@ class TestUpdateSettings:
             "max_turns_for_context": 9,
             "show_tool_calls": False,
             "enable_persona_memories": False,
+            "debug_latency": False,
         }
 
     def test_enable_persona_memories_round_trip(self, client):

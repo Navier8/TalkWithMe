@@ -22,6 +22,7 @@ general:
   show_tool_calls: true
   enable_persona_memories: true
   personas_directory: null
+  debug_latency: true
 mcp:
   servers: []
   max_tool_iterations: 8

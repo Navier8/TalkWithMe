@@ -48,6 +48,7 @@ def _to_response(cfg: AppSettings) -> SettingsResponse:
             max_turns_for_context=cfg.general.max_turns_for_context,
             show_tool_calls=cfg.general.show_tool_calls,
             enable_persona_memories=cfg.general.enable_persona_memories,
+            debug_latency=cfg.general.debug_latency,
         ),
     )
 
@@ -114,7 +115,8 @@ def update_settings(req: SettingsUpdateRequest):
     )
 
     app_config.save_settings(updated)
-    logger.info("Settings updated: llm=%s, tts_active=%s, stt_active=%s",
-                updated.llm.base_url, updated.tts.is_active, updated.stt.is_active)
+    logger.info("Settings updated: llm=%s, tts_active=%s, stt_active=%s, debug_latency=%s",
+                updated.llm.base_url, updated.tts.is_active, updated.stt.is_active,
+                updated.general.debug_latency)
 
     return _to_response(updated)

@@ -421,6 +421,13 @@
                             <label for="gsf-max-turns-for-context">Max Turns for Context <span class="field-hint">(1–50)</span></label>
                             <input id="gsf-max-turns-for-context" type="number" min="1" max="50" required>
                         </div>
+                        <div class="form-row">
+                            <label class="settings-checkbox-label">
+                                <input id="gsf-debug-latency" type="checkbox">
+                                <span>Log latency breakdown</span>
+                            </label>
+                            <span class="field-hint">Print a per-stage STT&nbsp;&rarr;&nbsp;LLM&nbsp;&rarr;&nbsp;TTS timing report to the browser console (and STT/TTS call durations to the server log). Diagnostic only.</span>
+                        </div>
                     </fieldset>
                 </div>
                 <div class="form-actions">
@@ -437,6 +444,7 @@
     <script src="/static/state.js"></script>
     <script src="/static/utils.js"></script>
     <script src="/static/theme.js"></script>
+    <script src="/static/latency.js"></script>
     <script src="/static/persistence.js"></script>
     <script src="/static/tts.js"></script>
     <script src="/static/stt.js"></script>

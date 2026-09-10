@@ -132,6 +132,7 @@ class TestGeneralSettingsRequestPartialUpdate:
             "max_turns_for_context": None,
             "show_tool_calls": None,
             "enable_persona_memories": None,
+            "debug_latency": None,
         }
 
     def test_general_settings_request_exclude_none_drops_omitted_fields(self):

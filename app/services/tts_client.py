@@ -9,6 +9,7 @@ STT client code lives in its own module: app.services.stt_client
 
 import base64
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -72,11 +73,18 @@ async def synthesize(
         "seed": settings.tts.seed,
     }
 
+    started = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=settings.tts.timeout) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+            if settings.general.debug_latency:
+                logger.info(
+                    "[latency] TTS synthesis: %.0f ms (%d chars)",
+                    (time.monotonic() - started) * 1000, len(text),
+                )
+            return result
     except Exception as exc:
         logger.warning("TTS synthesis failed: %s", exc)
         return None

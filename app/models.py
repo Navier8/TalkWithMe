@@ -211,6 +211,7 @@ class GeneralSettingsRequest(BaseModel):
     max_turns_for_context: Optional[int] = Field(default=None, ge=1, le=50)
     show_tool_calls: Optional[bool] = None
     enable_persona_memories: Optional[bool] = None
+    debug_latency: Optional[bool] = None
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -254,6 +255,7 @@ class GeneralSettingsResponse(BaseModel):
     max_turns_for_context: int
     show_tool_calls: bool
     enable_persona_memories: bool
+    debug_latency: bool = False
 
 
 class SettingsResponse(BaseModel):

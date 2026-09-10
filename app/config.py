@@ -109,6 +109,13 @@ class GeneralConfig(BaseModel):
     # restart, because the directory is resolved at startup and by the
     # persona router from this cache.
     personas_directory: Optional[str] = None
+    # Diagnostic timing. When true, the browser logs a per-stage
+    # breakdown of the voice round-trip (mic stop -> STT -> LLM -> TTS ->
+    # last audio finishes) to the dev console, and the STT/TTS proxies log
+    # their upstream call durations at INFO. Off by default — pure noise
+    # unless you're actively measuring latency. Editable from the General
+    # Settings dialog.
+    debug_latency: bool = False
 
     @model_validator(mode="before")
     @classmethod
