@@ -280,6 +280,7 @@ class FakeLLMClient:
     ):
         self.lines = lines
         self.post_response = post_response
+        self.headers = kwargs.get("headers") or {}
         self.payloads: List[dict] = []
 
     async def __aenter__(self):

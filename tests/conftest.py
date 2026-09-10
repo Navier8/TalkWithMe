@@ -34,6 +34,9 @@ def isolated_app_state(tmp_path, monkeypatch):
     monkeypatch.setattr(app_config, "_PROJECT_ROOT", tmp_path)
     # All chatroom history/audio files land here.
     monkeypatch.setattr(persistence, "_PERSISTENCE_ROOT", tmp_path / "chatrooms")
+    # A real TALKWITHME_LLM_API_KEY in the developer's shell/.env must not
+    # leak into tests that exercise load_settings() directly.
+    monkeypatch.delenv("TALKWITHME_LLM_API_KEY", raising=False)
     # The persistence router imported _PERSISTENCE_ROOT by value at import
     # time, so it needs its own patch to stay in sync.
     monkeypatch.setattr(persistence_router, "_PERSISTENCE_ROOT", tmp_path / "chatrooms")

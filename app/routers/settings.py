@@ -70,9 +70,10 @@ def update_settings(req: SettingsUpdateRequest):
     stt_base = req.stt.base_url if req.stt.base_url.strip() else None
     tts_seed = None if req.tts.seed == 0 else req.tts.seed
 
-    # The mcp section is yaml-only for now (deliberately not in the request
-    # model). Carry it over from the current config, otherwise every UI save
-    # would silently wipe it from settings.yaml.
+    # The mcp section is yaml-only and llm.api_key is env-only (see
+    # TALKWITHME_LLM_API_KEY in app/config.py) — both deliberately absent
+    # from the request model — so they must be carried over from the
+    # current config, otherwise every UI save would silently wipe them.
     current = app_config.get_settings()
 
     # The general section is a partial update: fields the client omitted
@@ -89,6 +90,7 @@ def update_settings(req: SettingsUpdateRequest):
     updated = AppSettings(
         llm=LLMSettings(
             base_url=req.llm.base_url,
+            api_key=current.llm.api_key,
             model=req.llm.model,
             max_tokens=req.llm.max_tokens,
             temperature=req.llm.temperature,

@@ -1,11 +1,11 @@
 llm:
-  base_url: http://saturn-lm:8080
+  base_url: http://127.0.0.1:8888
   model: default
   max_tokens: 1024
   temperature: 0.8
 tts:
   enabled: true
-  base_url: http://saturn-lm:8181
+  base_url: http://127.0.0.1:8181
   num_steps: 14
   guidance_scale: 1.5
   seed: null
@@ -13,13 +13,15 @@ tts:
   streaming: true
 stt:
   enabled: true
-  base_url: http://saturn-lm:5000
+  base_url: http://127.0.0.1:5000
   timeout: 30.0
 general:
   persona_name_mentions: true
-  max_persona_replies: 1
+  max_persona_replies: 4
   max_turns_for_context: 6
   show_tool_calls: true
+  enable_persona_memories: true
+  personas_directory: null
 mcp:
   servers: []
   max_tool_iterations: 8

@@ -13,3 +13,13 @@ restore.sh
 .venv/
 startup.sh
 
+# Secrets — never commit. See .env.example for the template.
+.env
+
+# Codebase indexing cache (codebase-memory-mcp)
+.codebase-memory/
+
+# Local runtime/dev tooling (machine-specific, not project code)
+data/
+run.bat
+

@@ -60,6 +60,20 @@ class TestUpdateSettings:
         # And it persisted to settings.yaml (redirected to tmp by the fixture).
         assert client.get("/api/settings").json()["tts"]["base_url"] == "http://tts.local:5500"
 
+    def test_llm_api_key_carried_over_from_current_config_not_request(self, client, monkeypatch):
+        """llm.api_key is env-only (TALKWITHME_LLM_API_KEY) — absent from
+        the request model — so a UI save must not wipe it, and it must
+        never appear in the response (it never reaches the browser)."""
+        current = make_settings()
+        current.llm.api_key = "secret-from-env"
+        monkeypatch.setattr(app_config, "_settings_cache", current)
+
+        resp = client.put("/api/settings", json=base_update())
+
+        assert resp.status_code == 200
+        assert "api_key" not in resp.json()["llm"]
+        assert app_config.get_settings().llm.api_key == "secret-from-env"
+
     def test_blank_base_urls_normalized_to_none(self, client):
         resp = client.put("/api/settings", json=base_update(
             tts={"enabled": True, "base_url": "   ", "num_steps": 10,

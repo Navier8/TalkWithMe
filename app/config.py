@@ -9,13 +9,22 @@ only for the one-time startup migration — never for anything else.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
+
+# Secrets (currently just the LLM API key) are never read from
+# settings.yaml — only from the environment, populated here from a local
+# .env file if one exists (see .env.example). Loaded at import time so it
+# runs before any load_settings() call, including in tests.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env")
 
 # ---------------------------------------------------------------------------
 # Persona memory limits (docs/feature_persona_memory.md)
@@ -36,6 +45,7 @@ rejected, never truncated — the LLM can reformulate a shorter one."""
 
 class LLMSettings(BaseModel):
     base_url: str = "http://localhost:8080"
+    api_key: str = ""
     model: str = "default"
     max_tokens: int = 1024
     temperature: float = 0.8
@@ -213,22 +223,32 @@ class ChatRoomsConfig(BaseModel):
 # Loading helpers
 # ---------------------------------------------------------------------------
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _settings_cache: Optional[AppSettings] = None
 _personas_cache: Optional[PersonasConfig] = None
 _chatrooms_cache: Optional[ChatRoomsConfig] = None
 
 
 def load_settings(path: Optional[Path] = None) -> AppSettings:
-    """Parse settings.yaml. Falls back to defaults if file is missing."""
+    """Parse settings.yaml. Falls back to defaults if file is missing.
+
+    ``llm.api_key`` is never read from settings.yaml — it comes only from
+    the TALKWITHME_LLM_API_KEY environment variable (see .env.example), so
+    the secret is never written to a file that could end up committed.
+    """
     global _settings_cache
     target = path or _PROJECT_ROOT / "settings.yaml"
-    if not target.exists():
-        return AppSettings()
-    with open(target) as f:
-        raw = yaml.safe_load(f) or {}
+    raw = {}
+    if target.exists():
+        with open(target) as f:
+            raw = yaml.safe_load(f) or {}
+
+    llm_raw = dict(raw.get("llm", {}))
+    llm_raw.pop("api_key", None)
+    llm = LLMSettings(**llm_raw)
+    llm.api_key = os.environ.get("TALKWITHME_LLM_API_KEY", "").strip()
+
     _settings_cache = AppSettings(
-        llm=LLMSettings(**raw.get("llm", {})),
+        llm=llm,
         tts=TTSConfig(**raw.get("tts", {})),
         stt=STTConfig(**raw.get("stt", {})),
         general=GeneralConfig(**raw.get("general", {})),
@@ -334,11 +354,16 @@ def get_personas() -> PersonasConfig:
 
 
 def save_settings(config: AppSettings, path: Optional[Path] = None) -> None:
-    """Serialize AppSettings back to settings.yaml and update the in-memory cache."""
+    """Serialize AppSettings back to settings.yaml and update the in-memory cache.
+
+    ``llm.api_key`` is deliberately excluded from the dump — it is a
+    secret sourced from TALKWITHME_LLM_API_KEY and must never be written
+    to settings.yaml (see load_settings()).
+    """
     global _settings_cache
     target = path or _PROJECT_ROOT / "settings.yaml"
     raw = {
-        "llm": config.llm.model_dump(exclude_none=False),
+        "llm": config.llm.model_dump(exclude_none=False, exclude={"api_key"}),
         "tts": config.tts.model_dump(exclude_none=False),
         "stt": config.stt.model_dump(exclude_none=False),
         "general": config.general.model_dump(exclude_none=False),

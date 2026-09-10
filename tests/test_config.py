@@ -235,6 +235,40 @@ class TestLoadPersonasDecisionMatrix:
 
 
 # ---------------------------------------------------------------------------
+# llm.api_key: env-only, never settings.yaml
+# ---------------------------------------------------------------------------
+
+class TestLLMApiKeyFromEnv:
+    """llm.api_key comes only from TALKWITHME_LLM_API_KEY (see .env.example)
+    — never from settings.yaml — so the secret can't end up committed."""
+
+    def test_defaults_to_empty_without_env_var(self, tmp_path):
+        path = tmp_path / "settings.yaml"
+        path.write_text("llm:\n  base_url: http://custom:1234\n")
+        assert app_config.load_settings(path).llm.api_key == ""
+
+    def test_env_var_populates_api_key(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TALKWITHME_LLM_API_KEY", "secret-123")
+        path = tmp_path / "settings.yaml"
+        path.write_text("llm:\n  base_url: http://custom:1234\n")
+        assert app_config.load_settings(path).llm.api_key == "secret-123"
+
+    def test_api_key_in_yaml_is_ignored_in_favor_of_env_var(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TALKWITHME_LLM_API_KEY", "from-env")
+        path = tmp_path / "settings.yaml"
+        path.write_text("llm:\n  base_url: http://custom:1234\n  api_key: from-yaml\n")
+        assert app_config.load_settings(path).llm.api_key == "from-env"
+
+    def test_save_settings_never_writes_api_key_to_yaml(self, tmp_path):
+        path = tmp_path / "settings.yaml"
+        settings = make_settings()
+        settings.llm.api_key = "secret-123"
+        app_config.save_settings(settings, path)
+        reloaded = yaml.safe_load(path.read_text())
+        assert "api_key" not in reloaded["llm"]
+
+
+# ---------------------------------------------------------------------------
 # Loading: missing files fall back to defaults
 # ---------------------------------------------------------------------------
 

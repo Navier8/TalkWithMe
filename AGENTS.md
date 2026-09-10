@@ -34,14 +34,19 @@ python3 -m pytest        # from the project root; config in pytest.ini
 | Source | Purpose |
 |--------|---------|
 | `settings.yaml` | LLM, TTS, STT endpoints and parameters, general chat parameters, MCP server list. `general.personas_directory` (default `Personas`) names the persona directory — **yaml-only**, no API/UI field |
+| `.env` | Secrets — currently just `TALKWITHME_LLM_API_KEY`. Loaded via `python-dotenv` at `app/config.py` import time (`load_dotenv(_PROJECT_ROOT / ".env")`); gitignored, never written by the app. See **Secrets** below |
 | `Personas/` (one directory per persona) | Persona definitions — the single source of truth. See **Persona storage** below |
 | `personas.yaml` | **Legacy only.** If present (and no `Personas/` dir), it is migrated to directories once at startup, then renamed to `personas.yaml.bak` and ignored forever |
 | `chatrooms.yaml` | Chat room groupings (may not exist; code handles gracefully) |
 
-All three are loaded once at startup and cached as module-level globals in `app/config.py`.
+`settings.yaml`, `Personas/`, and `chatrooms.yaml` are loaded once at startup and cached as module-level globals in `app/config.py`.
 In request handlers, **always use** `get_settings()`, `get_personas()`, `get_chatrooms()` — never call `load_*()` directly.
 To force a re-read of all three files, call `app.config.reload_all()`.
 **Caveat:** `reload_all()` does NOT re-run MCP tool discovery — the tool cache in `app/services/tool_registry.py` is built once at startup. Changes to the `mcp:` section of settings.yaml require a full app restart.
+
+### Secrets
+
+`AppSettings.llm.api_key` is populated exclusively from the `TALKWITHME_LLM_API_KEY` environment variable (`load_settings()` in `app/config.py`), sourced from `.env` via `python-dotenv` — never from `settings.yaml`. `load_settings()` drops any `llm.api_key` key found in the YAML before constructing `LLMSettings`, and `save_settings()` excludes `api_key` from what it dumps, so the key can never round-trip into the file even if something else wrote it there. It has no request/response model field and no UI — `update_settings()` in `app/routers/settings.py` carries it over from the current cached config (same pattern as the `mcp:` section) rather than accepting it from the client. `app/services/llm.py::_llm_headers()` reads it from `get_settings().llm.api_key` and sends `Authorization: Bearer <key>` on every LLM request when non-empty. Changing it requires editing `.env` and restarting (env vars are read once, like `TALKWITHME_LOG_LEVEL`).
 
 ## Persona storage
 

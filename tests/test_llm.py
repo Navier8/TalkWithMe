@@ -53,7 +53,11 @@ def finish_line(reason: str) -> str:
 
 
 def patch_llm_client(monkeypatch, client: FakeLLMClient):
-    monkeypatch.setattr(llm.httpx, "AsyncClient", lambda *a, **kw: client)
+    def make_client(*args, **kwargs):
+        client.headers = kwargs.get("headers") or {}
+        return client
+
+    monkeypatch.setattr(llm.httpx, "AsyncClient", make_client)
 
 
 def _run_until_complete(aw):
@@ -113,6 +117,17 @@ class TestStreamChat:
         assert payload["max_tokens"] == 1024
         assert payload["temperature"] == 0.8
         assert payload["messages"] == [{"role": "user", "content": "hi"}]
+        assert client.headers == {}
+
+    def test_stream_chat_sends_bearer_api_key(self, monkeypatch):
+        settings = app_config.get_settings()
+        settings.llm.api_key = "secret"
+        client = FakeLLMClient([token_line("x"), "data: [DONE]"])
+        patch_llm_client(monkeypatch, client)
+
+        _collect(llm.stream_chat([{"role": "user", "content": "hi"}]))
+
+        assert client.headers == {"Authorization": "Bearer secret"}
 
     def test_stream_chat_connection_error_propagates(self, monkeypatch):
         class RefusingStream:
@@ -157,6 +172,7 @@ class TestChatCompletion:
         assert payload["stream"] is False
         assert payload["max_tokens"] == 16
         assert payload["temperature"] == 0.1  # deterministic routing
+        assert client.headers == {}
 
     def test_chat_completion_returns_empty_string_on_failure(self, monkeypatch):
         class Down(FakeLLMClient):

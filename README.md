@@ -62,6 +62,7 @@ Open `http://localhost:8000` in your browser.
 Most settings can be changed in the UI. Behind the scenes, configuration is stored on disk:
 
 - `settings.yaml` stores LLM, TTS, STT, and MCP server endpoints plus general chat parameters
+- `.env` stores secrets — currently just the LLM API key (see below). Copy `.env.example` to `.env` and fill it in; `.env` is gitignored and never committed
 - `chatrooms.yaml` stores configured chat rooms (if any)
 - the `Personas/` directory stores all personas — one subdirectory per persona, each holding a `prompt.md` (frontmatter + system prompt), an optional `language.txt`, `ref.wav` + `ref.txt` (TTS voice reference), and an optional `image.<ext>` avatar. A legacy `personas.yaml`, if still present, is migrated to this layout automatically once on first startup (then renamed to `personas.yaml.bak` and ignored).
 
@@ -112,6 +113,11 @@ configuration here is the LLM.
 
 The `mcp` section currently has no UI — it is edited in `settings.yaml` directly and only
 read on startup (restart the app after changes).
+
+If your LLM server requires authentication, set `TALKWITHME_LLM_API_KEY` in `.env` (copy
+`.env.example` to get started). It is sent as `Authorization: Bearer <key>` on every LLM
+request. It has no UI and is never stored in `settings.yaml`, so it can't accidentally get
+committed; changing it requires a restart.
 
 ### Personas
 

@@ -205,11 +205,17 @@ async function fetchTTS(personaName, text, messageId) {
     if (!audioCtx) {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     }
+    if (audioCtx.state === "suspended") {
+        await audioCtx.resume();
+    }
 
     return await audioCtx.decodeAudioData(bytes.buffer);
 }
 
-function playAudio(buffer) {
+async function playAudio(buffer) {
+    if (audioCtx.state === "suspended") {
+        await audioCtx.resume();
+    }
     return new Promise((resolve) => {
         const source = audioCtx.createBufferSource();
         source.buffer = buffer;

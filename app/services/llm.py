@@ -25,6 +25,12 @@ from app.services.tool_registry import get_server_for_tool
 logger = logging.getLogger(__name__)
 
 
+def _llm_headers() -> Dict[str, str]:
+    """Return auth headers for providers that require an API key."""
+    api_key = get_settings().llm.api_key.strip()
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
 def _base_payload(messages: List[dict]) -> dict:
     """Common /v1/chat/completions payload fields (model, sampling, streaming)."""
     settings = get_settings()
@@ -46,7 +52,7 @@ async def _iter_completion_chunks(payload: dict) -> AsyncGenerator[dict, None]:
     settings = get_settings()
     url = f"{settings.llm.base_url}/v1/chat/completions"
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=120.0, headers=_llm_headers()) as client:
         async with client.stream("POST", url, json=payload) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
@@ -94,7 +100,7 @@ async def chat_completion(messages: List[Dict[str, str]], max_tokens: int = 64) 
     }
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=15.0, headers=_llm_headers()) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             body = resp.json()
