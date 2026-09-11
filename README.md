@@ -14,6 +14,7 @@ Follow the development of this app on my YouTube channel:
 - MCP integrations: https://www.youtube.com/watch?v=XhD9soU3hFM
 - Externalizing persona persistence: https://www.youtube.com/watch?v=Vj9rUy06Dcw
 - Adding persistent memories: https://www.youtube.com/watch?v=YD6cInSuQZs
+- Generifying the TTS server settings: (TODO video link here when ready)
 - Adding emotion to cloned AI voices: (TODO video link here when ready)
 
 ## Features
@@ -24,7 +25,7 @@ Follow the development of this app on my YouTube channel:
 - Optional TTS: AI responses spoken aloud via a TTS server
 - Optional STT: Click the microphone icon to speak your prompt
 - Optional MCP tools: let any persona call tools served by MCP servers (e.g. fetch web pages, run queries)
-- Fully local — no internet required, no authentication
+- Fully local — no internet required, no authentication. You can connect to remote LLMs with an API key if you wish, but TalkWithMe can be run 100% locally. NOTE: only connect to remote LLMs that you trust.
 - Theme chooser in the top-right: Dark (default), Light, Matrix, and Blues
 - Each room persists its text and audio messages
 
@@ -32,10 +33,11 @@ Follow the development of this app on my YouTube channel:
 
 - Python 3.10+
 - A locally running llama.cpp server with OpenAI-compatible API (e.g., `--api` flag)
-- (Optional) A local TTS REST server with `/synthesize` and `/health` endpoints.
-   You can use one of my [TTS server scripts](https://github.com/scorbo2/ai-playground/tree/master/TTS)
-   in front of [dots.tts](https://github.com/studio-dots-ai/dots.tts), [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS),
-   or [OmniVoice](https://github.com/k2-fsa/OmniVoice) server.
+- (Optional) A local TTS REST server with `/synthesize`, `/health`, and
+   `/capabilities` endpoints. Use one of the [tts-serve](https://github.com/scorbo2/tts-serve)
+   server scripts, running in front of [dots.tts](https://github.com/rednote-hilab/dots.tts),
+   [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS), [OmniVoice](https://github.com/k2-fsa/OmniVoice),
+   or [Chatterbox](https://github.com/resemble-ai/chatterbox).
 - (Optional) An OpenAI-compatible STT server that exposes a `/v1/audio/transcriptions` endpoint
    accepting multipart form uploads. The `stt.base_url` in `settings.yaml` should point to the
    server's root (e.g., `http://localhost:8181`), and the app will POST to
@@ -83,11 +85,18 @@ llm:
 tts:
   enabled: true
   base_url: http://localhost:5500
-  num_steps: 10
-  guidance_scale: 1.5
-  seed: null
   timeout: 60
   streaming: false
+  # Engine parameters: a free-form map of parameter name -> value. Which names
+  # exist, their types, and their allowed ranges are defined by the TTS
+  # engine's /capabilities document, not by this app. Omitted keys (or a null
+  # value) are never sent, so the engine falls back to its own default.
+  # Example for OmniVoice (a different engine advertises a different set):
+  #   parameters:
+  #     num_steps: 16          # int 4-128
+  #     guidance_scale: 2.0    # number 0-10
+  #     seed: 42               # int 1-1000; omit for a random seed
+  parameters: {}
 
 stt:
   enabled: true
@@ -113,6 +122,66 @@ configuration here is the LLM.
 The `mcp` section currently has no UI — it is edited in `settings.yaml` directly and only
 read on startup (restart the app after changes).
 
+### LLM API key (remote LLMs)
+
+TalkWithMe was built assuming a local LLM that needs no credentials. If your LLM is
+remote (OpenAI, Groq, a hosted server with auth, ...), you can optionally configure
+an API key. The key is deliberately **not** in `settings.yaml` (that file is tracked
+in git) — it is resolved once at startup from two sources, in priority order:
+
+1. the `TALKWITHME_LLM_API_KEY` environment variable (the raw key value; wins over the file)
+2. an `llm_api_key` file in the project root (`llm_api_key = <your key>`)
+
+If neither is set, no key is sent and everything works exactly as before. When
+configured, every LLM request carries an `Authorization: Bearer <key>` header.
+
+To use the file, copy the example and fill in your key:
+
+```bash
+cp llm_api_key.example llm_api_key
+# edit llm_api_key and replace your_key_here
+chmod 600 llm_api_key    # recommended: keep the key readable only by you
+```
+
+Notes and gotchas:
+
+- `llm_api_key` is git-ignored; only `llm_api_key.example` is committed.
+- The key is never shown in the UI, cannot be viewed or changed at runtime, and is
+  never logged — the startup log reports only *whether* a key is configured, not its
+  value.
+- Changing the key requires a restart.
+- If your LLM `base_url` uses `http://` instead of `https://`, the app logs a
+  warning: your chats (and the API key) are sent in cleartext.
+- Note that using a remote LLM may incur usage costs.
+
+### Dynamic TTS parameters
+
+The Servers dialog does not show a fixed list of TTS parameter fields. When
+you open it (or change the TTS base URL), the app fetches the engine's
+`GET /capabilities` document and renders exactly the parameters that engine
+advertises — sliders for integer/number ranges, checkboxes for booleans,
+dropdowns for enums, plain inputs for strings — and validates your values
+against that document before saving. Values you leave blank are not sent, so
+the engine's own defaults apply. Point the base URL at a different engine and
+only that engine's parameters are shown and sent; the old engine's parameters
+are never transmitted to it (they remain harmlessly in `settings.yaml` until
+you delete them).
+
+A legacy `settings.yaml` that still carries `num_steps`, `guidance_scale`,
+and/or `seed` directly under `tts:` loads fine: those keys are folded into
+`parameters` at startup and rewritten in the new shape on the next settings
+save.
+
+The engines supported out of the box (one standalone script each, in
+[tts-serve](https://github.com/scorbo2/tts-serve)):
+
+| Engine | Server script | Sample rate | Notes |
+|--------|---------------|-------------|-------|
+| Chatterbox | `impl/server_chatterbox.py` | 24 kHz | Multilingual (23 language codes); output is PerTh-watermarked by the library |
+| OmniVoice | `impl/server_omnivoice.py` | 24 kHz | The fastest of the four; auto-transcribes the reference clip when the transcript is omitted |
+| Qwen3-TTS | `impl/server_qwen3TTS.py` | 24 kHz | 10 language names + `auto`; falls back to speaker-embedding cloning when the transcript is omitted |
+| dots.tts | `impl/server_dotsTTS.py` | 48 kHz | Flow-matching knobs (`num_steps`, `ode_method`, guidance/speaker scales) |
+
 ### Personas
 
 Select the "Personas" control in the top right to bring up the Personas editor:
@@ -128,7 +197,7 @@ In this editor, you can:
 
 Changes are persisted immediately to the `Personas/` directory (configured in `settings.general.personas_directory`) and the sidebar persona list is refreshed automatically. No server restart is needed.
 
-> **Note**: renaming or deleting a persona does not modify messages already visible in the chat panel — those retain the name they were created with. Renaming does not rename the on-disk directory (the name is recorded inside `prompt.md`), so a directory name may legitimately differ from the persona's displayed name.
+> **Note**: renaming or deleting a persona does not modify messages already visible in the chat panel — those retain the name they were created with. Renaming a persona also renames its on-disk directory (best-effort — see [Renaming a persona](#renaming-a-persona) below), so a directory name may occasionally differ from the persona's displayed name.
 
 Each persona is one directory: `Personas/<Name>/`. Its settings are persisted across these files:
 
@@ -158,6 +227,28 @@ A `name:` frontmatter line is written only when the persona's name differs from 
 (Note that the reference-audio language does not control what language the persona speaks. It refers
 specifically to the language of the supplied reference audio, if any, so that voice cloning
 can be more accurate)
+
+#### Renaming a persona
+
+Renaming a persona also renames its directory, so `Personas/<Name>/` keeps matching the
+persona's displayed name. This means the common "clone a persona, then rename the clone"
+workflow doesn't leave numbered directories like `Alex_2`, `Alex_3`, ... on disk.
+
+The directory rename is best-effort. In the following cases the persona's name is updated
+but the directory keeps its old name (the new name is recorded in the `name:` frontmatter
+line of `prompt.md`, so nothing is lost):
+
+- The new name contains no characters that can be used in a directory name (only letters,
+  numbers, spaces, hyphens, and underscores are allowed), so no directory name can be
+  derived from it.
+- The sanitized new name would collide with an existing directory. Different persona names
+  can sanitize to the same directory name (for example `O'Brien` and `O*Brien` both become
+  `OBrien`), and one persona's directory is never clobbered by another.
+- The filesystem refuses the rename (permissions, a locked directory, ...). The save still
+  succeeds; only the directory keeps its old name.
+
+A plain edit that doesn't change the name never moves the directory, and a new name whose
+sanitized form is already the directory's name has nothing to move either.
 
 #### Persona fields
 
@@ -267,6 +358,8 @@ By default, only one AI persona in the current chat room will answer your prompt
 
 If you want your personas to be able to *do* things — fetch a web page, query a database, check the weather — you can connect one or more [MCP (Model Context Protocol)](https://modelcontextprotocol.io) servers. When a persona with tools enabled replies, TalkWithMe runs an agentic loop: the LLM may request tool calls, TalkWithMe executes them against the configured MCP servers, feeds the results back to the LLM, and repeats until the LLM produces a final text answer.
 
+Be careful connecting MCP servers, especially if you are connecting to a remote LLM. You are giving the LLM the ability to execute arbitrary tools, which might be a privacy or security concern.
+
 ## Persona memories
 
 Every time you select "New Chat" in a given chat room, the chat history of that room is wiped. But, your personas have access to a new feature (added in V6) to allow them to persist certain memories across chat sessions, and across chat rooms. To enable this for a persona, the following conditions must be met:
@@ -316,6 +409,24 @@ By default, every tool a persona calls shows up in the chat as a small chip (e.g
 - **Only the final answer is persisted.** Chat history stores the persona's text reply; tool calls and results are not saved. Tool chips are a live, in-view decoration only — they disappear on page reload or room switch.
 - **Errors become feedback.** If an MCP server fails or reports an error, the LLM receives a plain-text `Error: ...` result and can retry or explain the failure — the reply will never silently vanish because of a broken tool.
 - **Connections are stateless.** Every tool call opens a fresh MCP session (`initialize` handshake) and closes it afterwards. If your MCP server keeps long-lived session state, TalkWithMe does not preserve it between calls.
+
+## Global system prompt
+
+Sometimes, you want to specify instructions that apply to **all** personas, not just one or two
+selectively. You could do this by copy+pasting the instructions to each persona's system prompt,
+but this makes it difficult to change those instructions over time (you have to modify EVERY
+persona's system prompt). A better way is to use the global system prompt option, in the
+general Settings dialog:
+
+![General settings](screenshots/general_settings.jpg)
+
+Any text added here is automatically appended to the end of each persona's system prompt.
+Blank out the text field to disable this feature.
+
+Adding or modifying text here takes effect immediately on save - no restart is needed.
+
+Remember that the "echo chamber" feature bypasses the LLM entirely, so the
+global prompt has no effect there.
 
 ## Chat persistence
 
@@ -390,8 +501,9 @@ work, if they provide an OpenAI-compatible API.
 Because both TTS and STT are optional, you have several options for running the
 application, depending on how much VRAM you can throw at it.
 
-Refer to the [TTS README](https://github.com/scorbo2/ai-playground/blob/master/TTS/README.md) for more
-details about setting up the server-side TTS script.
+Refer to the [tts-serve docs](https://github.com/scorbo2/tts-serve) for more
+details about setting up a server-side TTS script — each engine has its own
+standalone script under `impl/` with per-engine install notes.
 
 ### Minimal setup (~4GB VRAM)
 
@@ -464,6 +576,13 @@ details about setting up the server-side TTS script.
   - Major changes to Persona persistence (#87)
   - Fix longstanding display issues in Persona/Chat Room modals (#94)
   - Bump dependency versions to something less ancient (#81)
+- **2026-09-10** v7.0
+  - Dynamic UI for TTS server configuration via `tts-serve` (#86)
+  - Allow deletion of individual messages in a chat (#99)
+  - Add API key option for LLM connections (#100)
+  - Add global system prompt option (#101)
+  - Bug fix: cloning a persona should rename its directory (#102)
+  - Bug fix: two chatroom deletion issues (#105)
 
 ## License
 

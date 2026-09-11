@@ -180,6 +180,27 @@ def _system_prompt_with_memories(persona, settings) -> str:
     )
 
 
+def _with_global_system_prompt(system_prompt: str, settings) -> str:
+    """Append general.global_system_prompt to a persona's final system prompt.
+
+    Appended AFTER the persona prompt and any injected memories, so global
+    rules sit at the very end of the prompt — the spot the LLM is most
+    likely to weigh when persona-specific instructions disagree (e.g. a
+    persona that likes markdown vs. a global "plain text only for TTS").
+    A blank line separates the two sections. Empty/whitespace-only values
+    leave the prompt untouched; surrounding whitespace is stripped so a
+    stray trailing newline from the settings textarea never lands in the
+    prompt.
+    """
+    global_prompt = (settings.general.global_system_prompt or "").strip()
+    if not global_prompt:
+        return system_prompt
+    # rstrip the base so the separator is EXACTLY one blank line: the
+    # memories block (and hand-edited persona prompts) may already end with
+    # their own trailing newline, which would otherwise double it up.
+    return system_prompt.rstrip() + "\n\n" + global_prompt
+
+
 # ---------------------------------------------------------------------------
 # SSE streaming
 # ---------------------------------------------------------------------------
@@ -274,7 +295,8 @@ async def _chat_stream(req: ChatRequest) -> AsyncIterator[str]:
         else:
             # Normal path: stream LLM response (history already includes prior personas' replies)
             messages = session.build_llm_messages(
-                system_prompt=_system_prompt_with_memories(persona, settings),
+                system_prompt=_with_global_system_prompt(
+                    _system_prompt_with_memories(persona, settings), settings),
                 responding_persona=persona_name,
                 max_turns_for_context=settings.general.max_turns_for_context,
             )

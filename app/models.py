@@ -1,10 +1,10 @@
 """Pydantic request / response models for the TalkWithMe API."""
 
-from typing import List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from app.config import DEFAULT_MEMORY_SIZE, MAX_MEMORY_SIZE
+from app.config import DEFAULT_MEMORY_SIZE, MAX_MEMORY_SIZE, is_valid_room_name
 
 
 # ---------------------------------------------------------------------------
@@ -26,6 +26,18 @@ class ChatRequest(BaseModel):
         default=None,
         description="Frontend-generated UUID for this message (for audio association)",
     )
+
+    @field_validator("chat_room")
+    @classmethod
+    def _validate_chat_room(cls, value: str) -> str:
+        # chat_room flows straight into on-disk paths (history.json + audio
+        # files are created under the persistence root). Anything outside the
+        # room-name alphabet is a traversal attempt, not a typo.
+        if not is_valid_room_name(value):
+            raise ValueError(
+                "Room name may only contain letters, numbers, spaces, hyphens, and underscores."
+            )
+        return value
 
 
 class SessionPersonasRequest(BaseModel):
@@ -128,12 +140,6 @@ class AudioUploadRequest(BaseModel):
     mime_type: Optional[str] = None
 
 
-class TTSResponse(BaseModel):
-    """Base64-encoded audio from the TTS server."""
-    audio_base64: str
-    sample_rate: int = 24000
-
-
 class STTResponse(BaseModel):
     """Transcribed text from an OpenAI-compatible STT server."""
     text: str
@@ -180,14 +186,21 @@ class LLMSettingsRequest(BaseModel):
 
 
 class TTSSettingsRequest(BaseModel):
-    """TTS configuration from the settings editor."""
+    """TTS configuration from the settings editor.
+
+    `parameters` is the generic engine parameter map (TTS generification,
+    plan T1): name -> value for whatever the connected engine's
+    /capabilities document advertises. "No value" is an absent key — the
+    old seed 0->None convention is gone. Legacy num_steps/guidance_scale/
+    seed keys from a pre-generification client are ignored on purpose:
+    they degrade to engine defaults instead of erroring, until the dynamic
+    parameter form replaces the static fields (plan M4).
+    """
     enabled: bool = True
     base_url: str = Field(default="", min_length=0)
-    num_steps: int = Field(..., ge=4, le=20)
-    guidance_scale: float = Field(..., ge=1.0, le=2.0)
-    seed: int = Field(default=0, description="0 means null (no seed)")
     timeout: float = Field(..., ge=5, le=300)
     streaming: bool = False
+    parameters: Dict[str, Any] = Field(default_factory=dict)
 
 
 class STTSettingsRequest(BaseModel):
@@ -211,6 +224,10 @@ class GeneralSettingsRequest(BaseModel):
     max_turns_for_context: Optional[int] = Field(default=None, ge=1, le=50)
     show_tool_calls: Optional[bool] = None
     enable_persona_memories: Optional[bool] = None
+    # None = keep the current value (partial update); an explicit "" (or any
+    # string) overrides it. This is what lets the General settings dialog
+    # clear the prompt by saving a blank textarea.
+    global_system_prompt: Optional[str] = None
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -230,14 +247,12 @@ class LLMSettingsResponse(BaseModel):
 
 
 class TTSSettingsResponse(BaseModel):
-    """TTS configuration for the frontend."""
+    """TTS configuration for the frontend (mirrors TTSSettingsRequest)."""
     enabled: bool
     base_url: Optional[str] = None
-    num_steps: int
-    guidance_scale: float
-    seed: Optional[int] = None
     timeout: float
     streaming: bool
+    parameters: Dict[str, Any] = Field(default_factory=dict)
 
 
 class STTSettingsResponse(BaseModel):
@@ -254,6 +269,7 @@ class GeneralSettingsResponse(BaseModel):
     max_turns_for_context: int
     show_tool_calls: bool
     enable_persona_memories: bool
+    global_system_prompt: str
 
 
 class SettingsResponse(BaseModel):
@@ -274,6 +290,12 @@ class ChatMessage(BaseModel):
     content: str
     # Which persona produced this message (only set for assistant messages)
     persona: Optional[str] = None
+    # The message's persisted UUID, when known. Set by the session manager
+    # from the ID passed to add_*_message() and copied from disk by
+    # load_room(); enables ID-precise operations such as selective deletion.
+    # Optional on purpose: messages created without an ID (legacy test
+    # fixtures, in-memory-only turns) keep working unchanged.
+    id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

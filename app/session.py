@@ -54,10 +54,14 @@ class SessionManager:
         self._current_room = room_name
         persisted = persistence.load_history(room_name)
         for msg in persisted:
+            # Carry the persisted IDs over so ID-based operations (selective
+            # deletion) keep working on reloaded rooms. .get(): a hand-edited
+            # history.json row without an "id" degrades to ID-less rather
+            # than crashing the room load.
             if msg["sender"] == "USER":
-                self.add_user_message_no_persist(msg["text"])
+                self.add_user_message_no_persist(msg["text"], msg.get("id"))
             else:
-                self.add_assistant_message_no_persist(msg["text"], msg["sender"])
+                self.add_assistant_message_no_persist(msg["text"], msg["sender"], msg.get("id"))
 
     def set_active_personas(self, names: List[str]):
         """Replace the active persona list."""
@@ -73,27 +77,48 @@ class SessionManager:
 
     def add_user_message(self, content: str, message_id: str):
         """Append a user message to history and persist it."""
-        self._history.append(ChatMessage(role="user", content=content))
-        persistence.persist_message(self._current_room, self._history[-1], message_id)
+        message = ChatMessage(role="user", content=content, id=message_id)
+        self._history.append(message)
+        persistence.persist_message(self._current_room, message, message_id)
 
     def add_assistant_message(self, content: str, persona: str, message_id: str):
         """Append an assistant message to history and persist it."""
-        self._history.append(ChatMessage(role="assistant", content=content, persona=persona))
-        persistence.persist_message(self._current_room, self._history[-1], message_id)
+        message = ChatMessage(role="assistant", content=content, persona=persona, id=message_id)
+        self._history.append(message)
+        persistence.persist_message(self._current_room, message, message_id)
 
-    def add_user_message_no_persist(self, content: str):
+    def add_user_message_no_persist(self, content: str, message_id: Optional[str] = None):
         """Append a user message to history without persisting.
 
         Used when loading from disk (messages are already persisted).
+        The ID is carried over so ID-based operations keep working.
         """
-        self._history.append(ChatMessage(role="user", content=content))
+        self._history.append(ChatMessage(role="user", content=content, id=message_id))
 
-    def add_assistant_message_no_persist(self, content: str, persona: str):
+    def add_assistant_message_no_persist(
+        self, content: str, persona: str, message_id: Optional[str] = None
+    ):
         """Append an assistant message to history without persisting.
 
         Used when loading from disk (messages are already persisted).
+        The ID is carried over so ID-based operations keep working.
         """
-        self._history.append(ChatMessage(role="assistant", content=content, persona=persona))
+        self._history.append(
+            ChatMessage(role="assistant", content=content, persona=persona, id=message_id)
+        )
+
+    def remove_message_by_id(self, message_id: str) -> bool:
+        """Remove the in-memory history entry with the given ID, if any.
+
+        Matching is by ID only — never by text or sender — so two
+        identical messages can't be mistaken for each other.
+        Returns False (and changes nothing) when no entry carries the ID.
+        """
+        for i, msg in enumerate(self._history):
+            if msg.id == message_id:
+                del self._history[i]
+                return True
+        return False
 
     def build_llm_messages(
         self,

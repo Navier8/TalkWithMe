@@ -237,6 +237,10 @@ function handleSSEEvent(event) {
             break;
         }
         case "done": {
+            // The server persists the reply right before emitting "done",
+            // so the row is on disk now — the delete button is safe to use.
+            enableDeleteButtonOnRow(currentAssistantRow);
+
             // The message ID was already adopted on "start" and stamped onto
             // every TTS item at enqueue time, so there is nothing to backfill.
             if (ttsEnabled && event.text) {
@@ -267,6 +271,12 @@ function handleSSEEvent(event) {
             if (bubble) {
                 bubble.textContent += `\n\n[Error: ${event.message}]`;
             }
+            // The stream ended WITHOUT "done" — on the error path the server
+            // never persists the reply, so this row (if it has a message ID)
+            // exists only in the DOM. Enable the delete button anyway: a
+            // click will 404 on the server and the handler removes the row
+            // from view, so display and disk end up in agreement.
+            enableDeleteButtonOnRow(currentAssistantRow);
             break;
         }
         case "complete": {
@@ -300,6 +310,7 @@ function appendUserBubble(text, messageId) {
 
     wrapper.appendChild(bubble);
     row.appendChild(wrapper);
+    addDeleteButtonToRow(row, messageId);
     messagesEl.appendChild(row);
     scrollToBottom();
 }
@@ -330,6 +341,13 @@ function createAssistantBubble(whoHint) {
     content.appendChild(loading);
     row.appendChild(avatar);
     row.appendChild(content);
+
+    // Delete button from birth, disabled until the reply is persisted:
+    // the server writes the row only at the end of the stream ("done"),
+    // so a live button mid-stream would have nothing to delete yet.
+    // The message ID is not known until the "start" event; the click
+    // handler falls back to row.dataset.messageId at click time.
+    addDeleteButtonToRow(row, null, true);
 
     return row;
 }
@@ -433,6 +451,114 @@ function appendErrorBubble(text) {
 }
 
 /* ==========================================================================
+    Message deletion
+    ========================================================================== */
+
+/**
+ * Attach a delete button to a message row.
+ *
+ * The button lands in the row's content container (the
+ * .user-message-content wrapper for user rows, .bubble-content for persona
+ * rows), as the last child — below the bubble and any audio buttons.
+ *
+ * @param {HTMLElement} row - The .message-row element.
+ * @param {string|null} messageId - The row's message ID, if known. Live
+ *     assistant rows are created before the "start" event issues one, so
+ *     this may be null; the click handler then falls back to the
+ *     row's data-message-id attribute (read at click time).
+ * @param {boolean} [disabled=false] - Start disabled (live assistant rows:
+ *     the reply is not persisted until the stream finishes).
+ */
+function addDeleteButtonToRow(row, messageId, disabled = false) {
+    const container = row.querySelector(".user-message-content")
+        || row.querySelector(".bubble-content");
+    if (!container) return;
+
+    const btn = document.createElement("button");
+    btn.className = "message-delete-btn";
+    btn.textContent = "\u{1F5D1}"; // trash icon
+    btn.title = "Delete message";
+    btn.setAttribute("aria-label", "Delete message");
+    btn.disabled = disabled;
+    btn.addEventListener("click", () => deleteMessageFromChat(row, messageId));
+    container.appendChild(btn);
+}
+
+/**
+ * Enable the delete button on a row, if it has one.
+ * Called when a persona reply's stream has settled (the "done" event, or
+ * the "error" event for streams that died before persisting).
+ */
+function enableDeleteButtonOnRow(row) {
+    if (!row) return;
+    const btn = row.querySelector(".message-delete-btn");
+    if (btn) {
+        btn.disabled = false;
+    }
+}
+
+/**
+ * Delete one message: ask the server to remove the persisted row and its
+ * audio, then remove the row from the DOM on a definitive answer.
+ *
+ * 200 — deleted on disk, remove from the DOM.
+ * 404 — the row was never persisted (e.g. a reply whose stream errored
+ *       before completion, or a user row from a failed request): there is
+ *       nothing on disk to clean up, so remove from the DOM as well and
+ *       warn; display and disk end up in agreement.
+ * anything else — keep the row (the user can retry) and warn.
+ *
+ * No confirmation dialog: single-user local app, worst case is one
+ * recoverable message.
+ */
+async function deleteMessageFromChat(row, messageId) {
+    const btn = row.querySelector(".message-delete-btn");
+    const rowMessageId = messageId || row.dataset.messageId;
+
+    // No message ID (e.g. a pre-"start" error placeholder): nothing on disk
+    // could ever reference this row, so it is a display-only cleanup.
+    if (!rowMessageId) {
+        console.warn("Delete requested for a row without a message ID; removing from view only.");
+        row.remove();
+        return;
+    }
+
+    // Prevent a double-click from firing a second delete while in flight.
+    if (btn) {
+        btn.disabled = true;
+    }
+
+    try {
+        const resp = await fetch(
+            `/api/persist/message/${encodeURIComponent(currentChatRoom)}/${encodeURIComponent(rowMessageId)}`,
+            { method: "DELETE" },
+        );
+        if (resp.status === 200 || resp.status === 404) {
+            if (resp.status === 404) {
+                console.warn(
+                    `Delete: message ${rowMessageId} is not persisted in room ` +
+                    `"${currentChatRoom}"; removing from view only.`,
+                );
+            }
+            row.remove();
+        } else {
+            console.warn(
+                `Delete failed (HTTP ${resp.status}) for message ${rowMessageId} in ` +
+                `room "${currentChatRoom}"; the message remains, you can retry.`,
+            );
+            if (btn) {
+                btn.disabled = false;
+            }
+        }
+    } catch (err) {
+        console.error("Delete request failed:", err);
+        if (btn) {
+            btn.disabled = false;
+        }
+    }
+}
+
+/* ==========================================================================
    Persisted history rendering
    ========================================================================== */
 
@@ -492,6 +618,7 @@ function appendPersistedUserBubble(msg, roomName) {
     }
 
     row.appendChild(wrapper);
+    addDeleteButtonToRow(row, msg.id);
     messagesEl.appendChild(row);
 }
 
@@ -556,6 +683,7 @@ function appendPersistedAssistantBubble(msg, roomName) {
 
     row.appendChild(avatar);
     row.appendChild(content);
+    addDeleteButtonToRow(row, msg.id);
     messagesEl.appendChild(row);
 }
 
@@ -603,12 +731,19 @@ function addAudioButtonToAssistantMessage(messageId, filename) {
     const content = row.querySelector(".bubble-content");
     if (!content) return;
 
-    // Lazily create the audio container on first button
+    // Lazily create the audio container on first button. Insert it before
+    // the delete button (if present) so the delete button stays the last
+    // child of .bubble-content.
     let audioContainer = content.querySelector(".message-audio");
     if (!audioContainer) {
         audioContainer = document.createElement("div");
         audioContainer.className = "message-audio";
-        content.appendChild(audioContainer);
+        const deleteBtn = content.querySelector(".message-delete-btn");
+        if (deleteBtn) {
+            content.insertBefore(audioContainer, deleteBtn);
+        } else {
+            content.appendChild(audioContainer);
+        }
     }
 
     const playBtn = document.createElement("button");
@@ -641,12 +776,19 @@ function addAudioButtonToUserMessage(messageId, filename, retries = 3) {
     const wrapper = row.querySelector(".user-message-content");
     if (!wrapper) return;
 
-    // Lazily create the audio container on first button
+    // Lazily create the audio container on first button. Insert it before
+    // the delete button (if present) so the delete button stays the last
+    // child of .user-message-content.
     let audioContainer = wrapper.querySelector(".message-audio");
     if (!audioContainer) {
         audioContainer = document.createElement("div");
         audioContainer.className = "message-audio";
-        wrapper.appendChild(audioContainer);
+        const deleteBtn = wrapper.querySelector(".message-delete-btn");
+        if (deleteBtn) {
+            wrapper.insertBefore(audioContainer, deleteBtn);
+        } else {
+            wrapper.appendChild(audioContainer);
+        }
     }
 
     const playBtn = document.createElement("button");

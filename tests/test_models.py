@@ -15,6 +15,8 @@ from app.models import (
     SessionPersonasRequest,
     SettingsUpdateRequest,
     STTRequest,
+    TTSSettingsRequest,
+    TTSSettingsResponse,
     TTSRequest,
 )
 
@@ -35,6 +37,21 @@ class TestChatRequest:
             message="hi", who_answers="random", chat_room="TNG", message_id="abc-123"
         )
         assert req.message_id == "abc-123"
+
+    @pytest.mark.parametrize(
+        "bad_room",
+        ["../outside", "../../outside", "room/name", "bad..room", ""],
+        ids=["dotdot", "dotdot-deeper", "slash", "dots", "empty"],
+    )
+    def test_chat_request_chat_room_outside_alphabet_rejected(self, bad_room):
+        # chat_room flows straight into on-disk persistence paths; these
+        # spellings are traversal attempts (or an empty string), not typos:
+        with pytest.raises(ValidationError, match="Room name may only contain"):
+            ChatRequest(message="hi", chat_room=bad_room)
+
+    def test_chat_request_chat_room_accepts_full_alphabet(self):
+        req = ChatRequest(message="hi", chat_room="My Room-1_x")
+        assert req.chat_room == "My Room-1_x"
 
 
 class TestSessionPersonasRequest:
@@ -132,12 +149,29 @@ class TestGeneralSettingsRequestPartialUpdate:
             "max_turns_for_context": None,
             "show_tool_calls": None,
             "enable_persona_memories": None,
+            "global_system_prompt": None,
         }
 
     def test_general_settings_request_exclude_none_drops_omitted_fields(self):
         req = GeneralSettingsRequest(show_tool_calls=False)
         dumped = req.model_dump(exclude_none=True)
         assert dumped == {"show_tool_calls": False}
+
+    def test_general_settings_request_omitted_global_prompt_is_dropped(self):
+        # Omitted (None) -> absent from the partial-update dump -> the
+        # current server-side value is preserved (e.g. a Servers-dialog
+        # save must not wipe the prompt).
+        req = GeneralSettingsRequest(show_tool_calls=False)
+        dumped = req.model_dump(exclude_none=True)
+        assert "global_system_prompt" not in dumped
+
+    def test_general_settings_request_explicit_empty_string_clears_global_prompt(self):
+        # The inverse matters: a blank textarea sends "" (not None), and
+        # "" IS in the partial-update dump — so the dialog can actually
+        # clear a previously set prompt.
+        req = GeneralSettingsRequest(global_system_prompt="")
+        dumped = req.model_dump(exclude_none=True)
+        assert dumped == {"global_system_prompt": ""}
 
     def test_general_settings_request_out_of_range_replies_rejected(self):
         with pytest.raises(ValidationError):
@@ -157,8 +191,63 @@ class TestSettingsUpdateRequest:
     def test_settings_update_request_general_defaults_to_empty_partial_update(self):
         req = SettingsUpdateRequest(
             llm={"base_url": "http://x", "model": "m", "max_tokens": 1, "temperature": 0.5},
-            tts={"num_steps": 4, "guidance_scale": 1.0, "timeout": 5},
+            tts={"timeout": 5},
             stt={"timeout": 5},
         )
         # No general section sent: everything stays None -> nothing overrides.
         assert req.general.model_dump(exclude_none=True) == {}
+
+
+class TestTTSSettingsModels:
+    """TTS generification (plan T1): the hard-coded num_steps/
+    guidance_scale/seed fields are replaced by a generic, untyped
+    parameters map. "No value" is an ABSENT key (the old seed 0->None
+    convention is gone)."""
+
+    def test_tts_settings_request_defaults(self):
+        req = TTSSettingsRequest(timeout=60)
+        assert req.enabled is True
+        assert req.base_url == ""
+        assert req.streaming is False
+        assert req.parameters == {}
+
+    def test_tts_settings_request_timeout_is_required_and_bounded(self):
+        with pytest.raises(ValidationError):
+            TTSSettingsRequest()  # timeout is required
+        with pytest.raises(ValidationError):
+            TTSSettingsRequest(timeout=4)   # < 5
+        with pytest.raises(ValidationError):
+            TTSSettingsRequest(timeout=301)  # > 300
+
+    def test_tts_settings_request_has_no_legacy_parameter_fields(self):
+        # The old static fields must be genuinely gone from the schema.
+        for legacy_key in ("num_steps", "guidance_scale", "seed"):
+            assert legacy_key not in TTSSettingsRequest.model_fields
+            assert legacy_key not in TTSSettingsResponse.model_fields
+
+    def test_tts_settings_request_old_shape_degrades_without_error(self):
+        # A pre-generification client still POSTs the three static fields.
+        # Pydantic ignores unknown fields: they drop out, parameters stays
+        # empty, and the save succeeds with engine defaults (plan M2).
+        req = TTSSettingsRequest(
+            enabled=True, base_url="http://tts:1", timeout=60, streaming=False,
+            num_steps=10, guidance_scale=1.5, seed=0,
+        )
+        assert req.parameters == {}
+
+    def test_tts_settings_request_accepts_mixed_type_parameters(self):
+        values = {"num_steps": 16, "guidance_scale": 1.5,
+                  "denoise": True, "ode_method": "rk4"}
+        req = TTSSettingsRequest(timeout=60, parameters=values)
+        assert req.parameters == values
+
+    def test_tts_settings_response_mirrors_request_shape(self):
+        resp = TTSSettingsResponse(
+            enabled=True, base_url="http://tts:1", timeout=60.0,
+            streaming=True, parameters={"seed": 7},
+        )
+        assert resp.parameters == {"seed": 7}
+        assert TTSSettingsResponse(
+            enabled=False, base_url=None, timeout=30.0,
+            streaming=False,
+        ).parameters == {}

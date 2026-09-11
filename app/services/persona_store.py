@@ -174,6 +174,53 @@ def unique_persona_dirname(root: Path, base: str) -> str:
     return candidate
 
 
+def rename_target_for(persona_dir: Path, new_name: str) -> Optional[Path]:
+    """Return the directory ``persona_dir`` should move to for ``new_name``.
+
+    Returns None when no move is safe or useful:
+      * the sanitized name is empty (the name has no directory-usable
+        characters — the frontmatter ``name`` field carries the identity),
+      * it would not change anything (it IS the current directory name),
+      * the target already exists. Distinct persona names can sanitize to
+        the same directory ("O'Brien" and "O*Brien" both -> "OBrien"), and
+        clobbering the other persona's directory is never acceptable; the
+        persona simply keeps its current directory, with the frontmatter
+        ``name`` field preserving its identity.
+
+    Pure: no mutation, only an ``exists()`` probe. ``Path.exists()`` honours
+    the filesystem's case sensitivity, so the probe is correct on
+    case-insensitive (macOS/Windows) and case-sensitive (Linux) alike.
+    """
+    base = sanitize_persona_dirname(new_name)
+    if not base or base == persona_dir.name:
+        return None
+    target = persona_dir.parent / base
+    if target.exists():
+        return None
+    return target
+
+
+def rename_persona_dir(persona_dir: Path, target: Path) -> bool:
+    """Move ``persona_dir`` to ``target`` (always same parent -> one rename).
+
+    Never raises; returns whether the move happened. A failed rename
+    (permissions, directory locked on Windows, ...) leaves the persona
+    fully functional in its old directory — the frontmatter ``name`` field
+    is the identity, the directory is only a container — so callers treat
+    failure as cosmetic.
+    """
+    try:
+        persona_dir.rename(target)
+    except OSError as exc:
+        logger.warning(
+            "Could not rename persona directory %s to %s: %s (persona keeps %s)",
+            persona_dir.name, target.name, exc, persona_dir.name,
+        )
+        return False
+    logger.info("Renamed persona directory %s -> %s", persona_dir.name, target.name)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Loading (read-only; never mutates the directory)
 # ---------------------------------------------------------------------------

@@ -101,3 +101,23 @@ class TestLoadRoom:
         body = resp.json()
         assert body["messages"] == []
         assert body["datetime"] is None
+
+    def test_load_room_with_dots_in_name_returns_422(self, client):
+        # The room name flows into persistence paths AND becomes the
+        # session's current room (which a later "New Chat" feeds to
+        # clear_room()), so anything outside the room-name alphabet is
+        # rejected before either path is touched:
+        resp = client.get("/api/session/load-room/bad..room")
+
+        assert resp.status_code == 422
+        assert "Room name may only contain" in str(resp.json()["detail"])
+
+    def test_load_room_with_dotdot_segment_returns_422(self, raw_asgi_get):
+        # httpx (the TestClient's transport) normalizes dot segments away
+        # client-side, so this goes through a raw ASGI scope built the way
+        # uvicorn does: a literal ".." segment arriving intact would
+        # otherwise let the endpoint read the PARENT of the persistence
+        # root and become the session's current room:
+        status, _ = raw_asgi_get("/api/session/load-room/..")
+
+        assert status == 422

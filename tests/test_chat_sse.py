@@ -141,6 +141,38 @@ def _chat(client, monkeypatch=None, **overrides) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Request validation
+# ---------------------------------------------------------------------------
+
+class TestRequestValidation:
+    def test_traversal_chat_room_returns_422_and_writes_nothing(
+        self, client, monkeypatch, persistence_root
+    ):
+        # chat_room flows straight into on-disk paths (history.json + audio
+        # files are created under the persistence root); an unvalidated
+        # "../evil" would let the persistence layer mkdir() and write
+        # outside of it. Validation must reject it before the LLM is even
+        # involved and before anything is persisted:
+        llm_calls = []
+
+        async def fake_stream(messages):
+            llm_calls.append(messages)
+            yield "nope"
+
+        monkeypatch.setattr(chat_router, "stream_chat", fake_stream)
+
+        resp = client.post("/api/chat", json={
+            "message": "hi", "who_answers": "Alex", "chat_room": "../evil",
+        })
+
+        assert resp.status_code == 422
+        assert "Room name may only contain" in str(resp.json()["detail"])
+        assert llm_calls == []
+        assert not (persistence_root.parent / "evil").exists()
+        assert not (persistence_root / "default" / "history.json").exists()
+
+
+# ---------------------------------------------------------------------------
 # Basic single-reply flow
 # ---------------------------------------------------------------------------
 
@@ -167,13 +199,20 @@ class TestSingleReply:
 
     def test_session_history_updated(self, client, monkeypatch):
         _stub_stream(monkeypatch, ["hi"])
-        _chat(client)
+        events = _chat(client)
 
         history = client.get("/api/session").json()["history"]
+        # The in-memory history carries the persisted message IDs (selective
+        # deletion relies on them) — the same IDs the SSE events issued.
+        start = events[0]
         assert history == [
-            {"role": "user", "content": "hello there", "persona": None},
-            {"role": "assistant", "content": "hi", "persona": "Alex"},
+            {"role": "user", "content": "hello there", "persona": None,
+             "id": start["user_message_id"]},
+            {"role": "assistant", "content": "hi", "persona": "Alex",
+             "id": start["message_id"]},
         ]
+        assert uuid.UUID(history[0]["id"])
+        assert uuid.UUID(history[1]["id"])
 
     def test_generated_user_message_id_when_absent(self, client, monkeypatch):
         _stub_stream(monkeypatch, ["hi"])
@@ -665,6 +704,135 @@ class TestPersonaMemory:
         # Exactly one stream call, via the plain (non-agentic) path.
         assert len(seen) == 1
         assert seen[0][0]["role"] == "system"
+
+
+# ---------------------------------------------------------------------------
+# Global system prompt (settings.general.global_system_prompt)
+# ---------------------------------------------------------------------------
+
+class TestGlobalSystemPrompt:
+    """general.global_system_prompt is appended to the END of every
+    persona's system prompt — the one place for rules that used to be
+    copy-pasted into each persona (e.g. "no markdown for TTS")."""
+
+    # -- _with_global_system_prompt (unit) -----------------------------------
+
+    def test_no_append_when_prompt_is_empty(self):
+        result = chat_router._with_global_system_prompt(
+            "You are Alex.", make_settings(),
+        )
+        assert result == "You are Alex."
+
+    def test_no_append_when_prompt_is_whitespace_only(self):
+        settings = make_settings(general=GeneralConfig(global_system_prompt="   \n  "))
+        result = chat_router._with_global_system_prompt("You are Alex.", settings)
+        assert result == "You are Alex."
+
+    def test_prompt_appended_after_blank_line(self):
+        settings = make_settings(general=GeneralConfig(
+            global_system_prompt="Do not use markdown."))
+        result = chat_router._with_global_system_prompt("You are Alex.", settings)
+        assert result == "You are Alex.\n\nDo not use markdown."
+
+    def test_surrounding_whitespace_is_stripped_from_appended_prompt(self):
+        # The settings textarea can pick up stray leading/trailing
+        # whitespace; the prompt must not (a trailing newline in the
+        # system prompt is exactly the kind of thing that makes the
+        # next section look like a continuation of the prompt body).
+        settings = make_settings(general=GeneralConfig(
+            global_system_prompt="  Do not use markdown.  \n"))
+        result = chat_router._with_global_system_prompt("You are Alex.", settings)
+        assert result == "You are Alex.\n\nDo not use markdown."
+
+    def test_multiline_global_prompt_preserves_inner_newlines(self):
+        settings = make_settings(general=GeneralConfig(
+            global_system_prompt="Line one.\nLine two."))
+        result = chat_router._with_global_system_prompt("You are Alex.", settings)
+        assert result == "You are Alex.\n\nLine one.\nLine two."
+
+    def test_base_prompt_trailing_newline_does_not_double_the_separator(self):
+        # A persona prompt ending in a newline (or the memories block's own
+        # trailing newline) must yield EXACTLY one blank line, not two.
+        settings = make_settings(general=GeneralConfig(
+            global_system_prompt="Do not use markdown."))
+        result = chat_router._with_global_system_prompt("You are Alex.\n", settings)
+        assert result == "You are Alex.\n\nDo not use markdown."
+
+    # -- ordering: memories first, global prompt last -------------------------
+
+    def test_global_prompt_appended_after_injected_memories(self, tmp_path):
+        # The global rules must sit at the very end of the prompt — after
+        # the persona prompt AND any injected memories — so they win when
+        # a persona-level instruction disagrees (a persona that likes
+        # markdown vs. a global "plain text only").
+        persona_dir = tmp_path / "Alex"
+        persona_dir.mkdir(parents=True)
+        (persona_dir / "memories.txt").write_text("The user likes tea.\n")
+        persona = Persona(name="Alex", system_prompt="You are Alex.",
+                          persona_dir=persona_dir)
+        settings = make_settings(general=GeneralConfig(
+            global_system_prompt="Plain text only."))
+
+        result = chat_router._with_global_system_prompt(
+            chat_router._system_prompt_with_memories(persona, settings), settings,
+        )
+        assert result == (
+            "You are Alex.\n\nYou have the following memories related to the user:\n"
+            "The user likes tea.\n\nPlain text only."
+        )
+
+    # -- integration: the append reaches the LLM payload ----------------------
+
+    def test_global_prompt_reaches_llm_payload(self, client, monkeypatch):
+        _patch_general(monkeypatch, global_system_prompt="No markdown, plain text only.")
+
+        seen = []
+
+        async def capturing_stream(messages):
+            seen.append(list(messages))
+            yield "hi"
+
+        monkeypatch.setattr(chat_router, "stream_chat", capturing_stream)
+
+        _chat(client, who_answers="Alex")
+
+        assert len(seen) == 1
+        system_message = seen[0][0]
+        assert system_message["role"] == "system"
+        assert system_message["content"].endswith("\n\nNo markdown, plain text only.")
+
+    def test_blank_global_prompt_leaves_llm_payload_untouched(self, client, monkeypatch):
+        _patch_general(monkeypatch, global_system_prompt="   ")
+
+        seen = []
+
+        async def capturing_stream(messages):
+            seen.append(list(messages))
+            yield "hi"
+
+        monkeypatch.setattr(chat_router, "stream_chat", capturing_stream)
+
+        _chat(client, who_answers="Alex")
+
+        system_message = seen[0][0]
+        assert system_message["content"] == "You are Alex, a friendly assistant."
+
+    def test_global_prompt_reaches_agentic_path_payload(self, client, monkeypatch, tmp_path):
+        # Tool-capable personas go through stream_chat_with_tools, not
+        # stream_chat — the append must apply to that path too.
+        config = make_personas()
+        config.personas.append(_tool_persona_dir(tmp_path))
+        _patch_personas(monkeypatch, config)
+        _patch_general(monkeypatch, global_system_prompt="Plain text only.")
+
+        seen = {}
+        _capturing_tools(monkeypatch, seen, events=[{"type": "token", "token": "hi"}])
+
+        _chat(client, who_answers="ToolUser")
+
+        system_message = seen["messages"][0]
+        assert system_message["role"] == "system"
+        assert system_message["content"].endswith("\n\nPlain text only.")
 
 
 # ---------------------------------------------------------------------------
