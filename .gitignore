@@ -21,6 +21,8 @@ llm_api_key
 .codebase-memory/
 
 # Local runtime/dev tooling (machine-specific, not project code)
+# run.bat is NOT ignored: every path in it is derived from %~dp0 at runtime,
+# so it contains no machine-specific or personal information. data/ holds the
+# PIDs of the running servers and is genuinely per-machine.
 data/
-run.bat
 
