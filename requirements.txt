@@ -22,4 +22,3 @@ pydantic==2.13.5
 pyyaml>=5.4.1
 python-multipart==0.0.32
 aiofiles==25.1.0
-python-dotenv==1.2.2
