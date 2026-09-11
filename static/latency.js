@@ -83,7 +83,7 @@ const latency = {
         if (!this.active || this.reported || !this.chatDone) return;
         const ttsIdle =
             audioQueue.length === 0 && !isPlayingAudio &&
-            ttsRequestQueue.length === 0 && audioBufferQueue.length === 0 &&
+            ttsRequestQueue.length === 0 && ttsReadyBuffers.size === 0 &&
             !isFetchingTTS && !isPlayingAudioBuffer &&
             (typeof sentenceBuffer !== "string" || sentenceBuffer === "");
         if (!ttsIdle) return;

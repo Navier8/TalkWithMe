@@ -6,7 +6,9 @@ need an active feature re-point the settings cache.
 """
 
 import asyncio
+import base64
 import logging
+from pathlib import Path
 
 import httpx
 import pytest
@@ -784,7 +786,9 @@ class TestFetchCapabilities:
         _run(tts_client.fetch_capabilities())
 
         assert seen["url"] == "http://tts.local:5500/capabilities"
-        assert seen["kwargs"] == {"timeout": 3.0}
+        # Built through the shared pool (app/services/http_pool.py), which
+        # always passes headers — None for TTS, which sends none of its own.
+        assert seen["kwargs"] == {"timeout": 3.0, "headers": None}
 
     def test_fetch_capabilities_inactive_tts_returns_none_without_network(self, monkeypatch):
         def fail(*a, **kw):
@@ -993,6 +997,106 @@ class TestReferenceAudioHelpers:
         txt = tmp_path / "ref.txt"
         txt.write_text("  a sample transcript\n\n", encoding="utf-8")
         assert tts_client.read_transcript(str(txt)) == "a sample transcript"
+
+
+class TestReferenceAudioCache:
+    """Streaming TTS asks for the reference clip once per SENTENCE, so the
+    encode is memoized. The cache must be invisible: same answers, plus a
+    re-recorded file picked up with no explicit invalidation."""
+
+    def test_repeat_calls_do_not_reread_the_file(self, tmp_path, monkeypatch):
+        wav = tmp_path / "ref.wav"
+        wav.write_bytes(b"RIFF-header-bytes")
+
+        reads = []
+        real_read_bytes = Path.read_bytes
+
+        def counting_read_bytes(self):
+            reads.append(str(self))
+            return real_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+
+        first = tts_client.encode_reference_audio(str(wav))
+        second = tts_client.encode_reference_audio(str(wav))
+        third = tts_client.encode_reference_audio(str(wav))
+
+        assert first == second == third
+        assert len(reads) == 1, f"file was read {len(reads)} times, expected 1"
+
+    def test_transcript_is_cached_too(self, tmp_path, monkeypatch):
+        txt = tmp_path / "ref.txt"
+        txt.write_text("hello", encoding="utf-8")
+
+        reads = []
+        real_read_text = Path.read_text
+
+        def counting_read_text(self, *args, **kwargs):
+            reads.append(str(self))
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+        assert tts_client.read_transcript(str(txt)) == "hello"
+        assert tts_client.read_transcript(str(txt)) == "hello"
+        assert len(reads) == 1
+
+    def test_rerecorded_clip_is_picked_up(self, tmp_path):
+        """The key includes (mtime, size), so editing a persona's reference
+        audio by hand takes effect on the next synthesis — no restart, no
+        explicit invalidation."""
+        wav = tmp_path / "ref.wav"
+        wav.write_bytes(b"old-audio")
+        before = tts_client.encode_reference_audio(str(wav))
+
+        # A different SIZE, so the key changes even if the filesystem's
+        # mtime resolution is too coarse to notice a same-tick rewrite.
+        wav.write_bytes(b"brand-new-audio-content")
+        after = tts_client.encode_reference_audio(str(wav))
+
+        assert before != after
+        assert after == base64.b64encode(b"brand-new-audio-content").decode("ascii")
+
+    def test_deleted_file_is_not_served_from_cache(self, tmp_path):
+        """A missing file must report missing, not replay the last good read."""
+        wav = tmp_path / "ref.wav"
+        wav.write_bytes(b"audio")
+        assert tts_client.encode_reference_audio(str(wav)) is not None
+
+        wav.unlink()
+        assert tts_client.encode_reference_audio(str(wav)) is None
+
+    def test_invalidate_clears_everything(self, tmp_path, monkeypatch):
+        wav = tmp_path / "ref.wav"
+        wav.write_bytes(b"audio")
+        tts_client.encode_reference_audio(str(wav))
+
+        tts_client.invalidate_reference_cache()
+
+        reads = []
+        real_read_bytes = Path.read_bytes
+
+        def counting_read_bytes(self):
+            reads.append(str(self))
+            return real_read_bytes(self)
+
+        monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+        tts_client.encode_reference_audio(str(wav))
+        assert len(reads) == 1, "invalidation must force a re-read"
+
+    def test_two_personas_do_not_share_an_entry(self, tmp_path):
+        a = tmp_path / "a.wav"
+        b = tmp_path / "b.wav"
+        a.write_bytes(b"persona-a-audio")
+        b.write_bytes(b"persona-b-audio")
+
+        assert tts_client.encode_reference_audio(str(a)) != \
+            tts_client.encode_reference_audio(str(b))
+        # And again, now that both are warm.
+        assert tts_client.encode_reference_audio(str(a)) == \
+            base64.b64encode(b"persona-a-audio").decode("ascii")
+        assert tts_client.encode_reference_audio(str(b)) == \
+            base64.b64encode(b"persona-b-audio").decode("ascii")
 
 
 # ---------------------------------------------------------------------------

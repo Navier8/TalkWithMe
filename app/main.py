@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 from app import config as app_config
 from app.routers import chat, chatrooms, personas, persistence, session as session_router, settings, stt, tts
 from app.session import session
-from app.services import llm, llm_auth
+from app.services import http_pool, llm, llm_auth
 from app.services.tool_registry import get_all_tools, load_tools
 from app.services.tts_client import ensure_capabilities
 
@@ -117,6 +117,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Release the pooled outbound HTTP connections (LLM / TTS / STT).
+    await http_pool.aclose_all()
     logger.info("TalkWithMe shutting down")
 
 

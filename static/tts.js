@@ -64,8 +64,40 @@ async function processAudioQueue() {
 }
 
 /* ==========================================================================
-   Streaming TTS (sentence-by-sentence: fetch and play are pipelined)
+   Streaming TTS (chunk-by-chunk: fetch and play are pipelined)
    ========================================================================== */
+
+/**
+ * How many /api/tts fetches may be in flight at once.
+ *
+ * Two, not one: with a single fetch the pipeline alternates
+ * synthesize-then-play, so every chunk's synthesis is dead air. With two,
+ * the next chunk is synthesized WHILE the current one plays, and playback
+ * runs gapless as long as synthesis is faster than real time.
+ *
+ * Not higher than two on purpose. The synthesis it overlaps runs on the
+ * same GPU the LLM is generating on; more concurrency past the point where
+ * audio is ready before it is needed just steals throughput from token
+ * generation, which delays the chunks that have not been queued yet.
+ */
+const TTS_MAX_CONCURRENT_FETCHES = 2;
+
+/**
+ * Minimum characters before the FIRST chunk may be cut at a soft break.
+ * Below this a clause is too short to be worth a whole synthesis request
+ * (per-request overhead would dominate) and sounds clipped.
+ */
+const TTS_FIRST_CHUNK_MIN = 40;
+
+/**
+ * Hard flush point for the first chunk: cut at the next word boundary past
+ * this many characters even with no punctuation in sight. Bounds the wait
+ * when a reply opens with a long unpunctuated clause.
+ */
+const TTS_FIRST_CHUNK_MAX = 60;
+
+/** Soft break characters — clause boundaries the first chunk may cut on. */
+const TTS_SOFT_BREAKS = ",;:\u2014\u2013-";
 
 /**
  * Split accumulated text into complete sentences (ending with . ! ?)
@@ -85,71 +117,156 @@ function extractSentences(text) {
 }
 
 /**
- * Append a token to the sentence buffer and queue any newly complete sentences.
+ * Find where to cut the first chunk of a reply, or -1 to keep waiting.
+ *
+ * Nothing can play until the first chunk has been synthesized, and
+ * synthesis time scales with chunk length — so the opening chunk is cut as
+ * early as it can be without sounding clipped, and only the opening one.
+ * Preference order:
+ *   1. a sentence terminal (. ! ?)  — always the best cut, at any length
+ *   2. a clause break (, ; : — –)   — once past TTS_FIRST_CHUNK_MIN
+ *   3. a word boundary              — once past TTS_FIRST_CHUNK_MAX
+ *
+ * Returns the index one PAST the last character of the chunk.
+ */
+function findFirstChunkEnd(text) {
+    const terminal = text.search(/[.!?]/);
+    if (terminal !== -1) return terminal + 1;
+
+    for (let i = TTS_FIRST_CHUNK_MIN; i < text.length; i++) {
+        if (TTS_SOFT_BREAKS.includes(text[i])) return i + 1;
+    }
+
+    if (text.length > TTS_FIRST_CHUNK_MAX) {
+        // Cut at the first space past the cap so a word is never split in
+        // half — a half word is audibly wrong in a way a long chunk is not.
+        const space = text.indexOf(" ", TTS_FIRST_CHUNK_MAX);
+        if (space !== -1) return space;
+    }
+    return -1;
+}
+
+/**
+ * Pull the chunks ready to synthesize out of the accumulated text.
+ *
+ * The first chunk of a reply uses findFirstChunkEnd (cut early, to start
+ * audio sooner); everything after it uses sentence granularity, which
+ * gives the engine whole sentences to work with and sounds better.
+ */
+function extractTTSChunks(text) {
+    const chunks = [];
+    let rest = text;
+
+    if (ttsFirstChunkPending) {
+        const end = findFirstChunkEnd(rest);
+        if (end === -1) return { chunks, remaining: rest };
+        const first = rest.slice(0, end).trim();
+        rest = rest.slice(end);
+        if (first) {
+            chunks.push(first);
+            ttsFirstChunkPending = false;
+        }
+    }
+
+    const { sentences, remaining } = extractSentences(rest);
+    return { chunks: chunks.concat(sentences), remaining };
+}
+
+/**
+ * Append a token to the sentence buffer and queue any newly complete chunks.
  */
 function accumulateForTTS(token, personaName) {
     sentenceBuffer += token;
-    const { sentences, remaining } = extractSentences(sentenceBuffer);
+    const { chunks, remaining } = extractTTSChunks(sentenceBuffer);
     sentenceBuffer = remaining;
-    for (const sentence of sentences) {
-        enqueueStreamingTTS(personaName, sentence);
+    for (const chunk of chunks) {
+        enqueueStreamingTTS(personaName, chunk);
     }
 }
 
-/** Push a sentence into the fetch queue and kick off the fetch pipeline. */
+/** Push a chunk into the fetch queue and kick off the fetch pipeline. */
 function enqueueStreamingTTS(personaName, text) {
     // Stamp the current message ID at enqueue time. It was issued by the
     // server in the "start" event, so it is already correct for this
     // response — no backfilling needed when "done" arrives.
-    ttsRequestQueue.push({ personaName, text, messageId: currentAssistantMessageId });
+    //
+    // The sequence number is stamped here too, and it is what keeps
+    // playback in order once fetches are allowed to finish out of order.
+    ttsRequestQueue.push({
+        personaName,
+        text,
+        messageId: currentAssistantMessageId,
+        seq: ttsNextSeq++,
+    });
     processTTSRequests();
 }
 
 /**
- * Fetch TTS for queued sentences serially (to preserve order).
- * Runs concurrently with audio playback so the next sentence's audio
- * is ready by the time the current one finishes playing.
+ * Start fetches for queued chunks, up to TTS_MAX_CONCURRENT_FETCHES at once.
+ *
+ * Each completed fetch files its decoded buffer under its sequence number
+ * and pokes the player; the player is what enforces order, so a fetch
+ * finishing early or late changes nothing about what the user hears.
  */
-async function processTTSRequests() {
-    if (isFetchingTTS || ttsRequestQueue.length === 0) return;
-    isFetchingTTS = true;
+function processTTSRequests() {
+    while (ttsInFlight < TTS_MAX_CONCURRENT_FETCHES && ttsRequestQueue.length > 0) {
+        runTTSFetch(ttsRequestQueue.shift());
+    }
+}
 
-    const item = ttsRequestQueue.shift();
+/** Fetch one queued chunk and file the result under its sequence number. */
+async function runTTSFetch(item) {
+    ttsInFlight++;
+    isFetchingTTS = true;
     try {
         const audioBuffer = await fetchTTS(item.personaName, item.text, item.messageId);
-        if (audioBuffer) {
-            audioBufferQueue.push(audioBuffer);
-            processAudioBufferQueue();
-        }
+        // null is filed too: the player must know this sequence is settled
+        // and skip it, rather than stalling forever waiting for audio that
+        // is never coming.
+        ttsReadyBuffers.set(item.seq, audioBuffer || null);
     } catch (err) {
         console.warn("TTS streaming fetch error:", err);
+        ttsReadyBuffers.set(item.seq, null);
     } finally {
-        isFetchingTTS = false;
+        ttsInFlight--;
+        isFetchingTTS = ttsInFlight > 0;
+        processAudioBufferQueue();
+        // Backfill the slot this fetch just freed.
+        processTTSRequests();
         latency.maybeFinish();  // covers a fetch that produced no audio to play
-        // Immediately fetch the next sentence if one is waiting
-        setTimeout(() => processTTSRequests(), 0);
     }
 }
 
 /**
- * Play decoded audio buffers in order, with a small gap between sentences.
- * Runs independently of the fetch pipeline so playback starts as soon as
- * the first buffer is ready.
+ * Play decoded audio buffers in sequence order, with a small gap between
+ * chunks. Runs independently of the fetch pipeline, so playback starts as
+ * soon as the first buffer is ready — but it will not skip ahead: if
+ * sequence N is still fetching, N+1 waits even though it is ready.
  */
 async function processAudioBufferQueue() {
-    if (isPlayingAudioBuffer || audioBufferQueue.length === 0) return;
+    if (isPlayingAudioBuffer) return;
+    if (!ttsReadyBuffers.has(ttsNextPlaySeq)) return;
     isPlayingAudioBuffer = true;
 
-    const buffer = audioBufferQueue.shift();
     try {
-        latency.mark("ttsFirstAudio");
-        await playAudio(buffer);
-        await new Promise(resolve => setTimeout(resolve, 80)); // brief inter-sentence gap
-    } catch (err) {
-        console.warn("Audio buffer playback error:", err);
+        // Drain every consecutive ready sequence in one pass, so a buffer
+        // that arrived while the previous one was playing starts with no
+        // extra round through the event loop.
+        while (ttsReadyBuffers.has(ttsNextPlaySeq)) {
+            const buffer = ttsReadyBuffers.get(ttsNextPlaySeq);
+            ttsReadyBuffers.delete(ttsNextPlaySeq);
+            ttsNextPlaySeq++;
+            if (!buffer) continue;  // settled-but-empty: skip, do not stall
+            try {
+                latency.mark("ttsFirstAudio");
+                await playAudio(buffer);
+                await new Promise(resolve => setTimeout(resolve, 80)); // brief inter-chunk gap
+            } catch (err) {
+                console.warn("Audio buffer playback error:", err);
+            }
+        }
     } finally {
         isPlayingAudioBuffer = false;
-        processAudioBufferQueue();
         latency.maybeFinish();
     }
 }

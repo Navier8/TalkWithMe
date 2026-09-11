@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 
+import httpx
 import pytest
 
 import app.config as app_config
@@ -121,6 +122,146 @@ class TestStreamChat:
         assert payload["max_tokens"] == 1024
         assert payload["temperature"] == 0.8
         assert payload["messages"] == [{"role": "user", "content": "hi"}]
+        # llama.cpp KV-cache reuse: without it every persona switch
+        # reprocesses the whole prompt from scratch.
+        assert payload["cache_prompt"] is True
+
+
+class TestCachePromptNegotiation:
+    """`cache_prompt` is a llama.cpp extension. Strict OpenAI-compatible
+    servers reject unknown fields outright, and this app supports a remote
+    LLM — so the field is offered optimistically and withdrawn for good on
+    the first 400 that it caused."""
+
+    @staticmethod
+    def _status_error(status: int) -> httpx.HTTPStatusError:
+        request = httpx.Request("POST", "http://llm.local/v1/chat/completions")
+        return httpx.HTTPStatusError(
+            f"HTTP {status}", request=request,
+            response=httpx.Response(status, request=request),
+        )
+
+    def test_stream_retries_once_without_the_field_on_400(self, monkeypatch):
+        class Rejecting(FakeLLMClient):
+            """400s any payload carrying cache_prompt; streams otherwise."""
+
+            def stream(self, method, url, json=None):
+                self.payloads.append(json)
+                if "cache_prompt" in json:
+                    return _RaisingStream(
+                        TestCachePromptNegotiation._status_error(400))
+                return FakeStreamResponse(self.lines)
+
+        client = Rejecting([token_line("ok"), "data: [DONE]"])
+        patch_llm_client(monkeypatch, client)
+
+        tokens = _collect(llm.stream_chat([{"role": "user", "content": "hi"}]))
+
+        assert tokens == ["ok"], "the retry must deliver the reply"
+        assert len(client.payloads) == 2
+        assert "cache_prompt" in client.payloads[0]
+        assert "cache_prompt" not in client.payloads[1]
+
+    def test_the_verdict_is_remembered_for_later_calls(self, monkeypatch):
+        class Rejecting(FakeLLMClient):
+            def stream(self, method, url, json=None):
+                self.payloads.append(json)
+                if "cache_prompt" in json:
+                    return _RaisingStream(
+                        TestCachePromptNegotiation._status_error(400))
+                return FakeStreamResponse(self.lines)
+
+        client = Rejecting([token_line("ok"), "data: [DONE]"])
+        patch_llm_client(monkeypatch, client)
+
+        _collect(llm.stream_chat([{"role": "user", "content": "one"}]))
+        client.payloads.clear()
+        _collect(llm.stream_chat([{"role": "user", "content": "two"}]))
+
+        # One request, and it never offered the field again.
+        assert len(client.payloads) == 1
+        assert "cache_prompt" not in client.payloads[0]
+
+    def test_a_persistent_400_surfaces_after_one_retry(self, monkeypatch):
+        """A 400 that was not about cache_prompt must reach the caller: the
+        field is withdrawn once, and when the error repeats it stands."""
+        class AlwaysRejecting(FakeLLMClient):
+            def stream(self, method, url, json=None):
+                self.payloads.append(json)
+                return _RaisingStream(
+                    TestCachePromptNegotiation._status_error(400))
+
+        client = AlwaysRejecting([])
+        patch_llm_client(monkeypatch, client)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            _collect(llm.stream_chat([{"role": "user", "content": "hi"}]))
+
+        # First attempt with the field, one retry without it, then the
+        # error stands — it is not retried a third time.
+        assert len(client.payloads) == 2
+        assert "cache_prompt" not in client.payloads[1]
+
+    def test_non_400_errors_are_never_swallowed_by_the_retry(self, monkeypatch):
+        class ServerError(FakeLLMClient):
+            def stream(self, method, url, json=None):
+                self.payloads.append(json)
+                return _RaisingStream(
+                    TestCachePromptNegotiation._status_error(500))
+
+        client = ServerError([])
+        patch_llm_client(monkeypatch, client)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            _collect(llm.stream_chat([{"role": "user", "content": "hi"}]))
+
+        assert len(client.payloads) == 1, "a 500 must not trigger the retry"
+
+    def test_router_call_sends_and_withdraws_the_field(self, monkeypatch):
+        request = httpx.Request("POST", "http://llm.local/v1/chat/completions")
+        ok = httpx.Response(
+            200, json={"choices": [{"message": {"content": "Kirk"}}]},
+            request=request,
+        )
+
+        class Rejecting(FakeLLMClient):
+            async def post(self, url, json=None):
+                self.payloads.append(json)
+                if "cache_prompt" in json:
+                    return httpx.Response(400, json={"error": "unknown field"},
+                                          request=request)
+                return ok
+
+        client = Rejecting([])
+        patch_llm_client(monkeypatch, client)
+
+        result = _run_until_complete(
+            llm.chat_completion([{"role": "user", "content": "pick"}]))
+
+        assert result == "Kirk"
+        assert len(client.payloads) == 2
+        assert "cache_prompt" in client.payloads[0]
+        assert "cache_prompt" not in client.payloads[1]
+
+
+class _RaisingStream:
+    """A stream context whose raise_for_status() raises the given error."""
+
+    def __init__(self, error):
+        self._error = error
+
+    def raise_for_status(self):
+        raise self._error
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def aiter_lines(self):  # pragma: no cover - never reached
+        if False:
+            yield ""
 
     def test_stream_chat_connection_error_propagates(self, monkeypatch):
         class RefusingStream:

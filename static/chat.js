@@ -219,10 +219,14 @@ function handleSSEEvent(event) {
                 highlightSelectedPersona();
             }
 
-            // Streaming TTS: track persona and reset sentence accumulator
+            // Streaming TTS: track persona and reset the chunk accumulator.
+            // ttsFirstChunkPending re-arms the aggressive first-chunk split
+            // per REPLY, not per turn: in a multi-persona room each persona's
+            // reply has its own "nothing is playing yet" gap to cover.
             if (ttsStreaming) {
                 currentStreamingPersona = event.persona;
                 sentenceBuffer = "";
+                ttsFirstChunkPending = true;
             }
             break;
         }
@@ -260,6 +264,7 @@ function handleSSEEvent(event) {
                             enqueueStreamingTTS(event.persona, remaining);
                         }
                         sentenceBuffer = "";
+                        ttsFirstChunkPending = true;
                         currentStreamingPersona = null;
                     } else {
                         // Non-streaming: enqueue full text at once

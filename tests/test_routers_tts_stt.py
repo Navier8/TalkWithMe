@@ -428,6 +428,99 @@ class TestSTTProxy:
         assert seen["audio_bytes"] == b"raw-audio"
         assert seen["mime_type"] == "audio/ogg"
 
+    def test_accepts_wrapped_base64(self, client, monkeypatch):
+        """Line-wrapped base64 is legal; validate=True must not reject it."""
+        _active_stt_settings(monkeypatch)
+        seen = {}
+
+        async def fake_transcribe(audio_bytes, mime_type="audio/webm"):
+            seen["audio_bytes"] = audio_bytes
+            return {"text": "ok", "language": "en", "language_probability": None}
+
+        monkeypatch.setattr(stt_router, "transcribe_audio", fake_transcribe)
+
+        payload = base64.b64encode(b"raw-audio" * 8).decode()
+        wrapped = chr(10).join(payload[i:i + 16] for i in range(0, len(payload), 16))
+
+        resp = client.post("/api/stt", json={"audio_base64": wrapped})
+
+        assert resp.status_code == 200
+        assert seen["audio_bytes"] == b"raw-audio" * 8
+
+    def test_empty_audio_400(self, client, monkeypatch):
+        """An empty body is a client bug, not something to hand upstream."""
+        _active_stt_settings(monkeypatch)
+
+        async def unreachable(audio_bytes, mime_type="audio/webm"):
+            raise AssertionError("STT must not be called with no audio")
+
+        monkeypatch.setattr(stt_router, "transcribe_audio", unreachable)
+
+        resp = client.post("/api/stt", files={"file": ("a.webm", b"", "audio/webm")})
+        assert resp.status_code == 400
+
+
+class TestSTTProxyMultipart:
+    """The frontend's path: the recorded blob is POSTed as-is, no base64."""
+
+    def test_multipart_upload_forwards_bytes_and_part_mime(self, client, monkeypatch):
+        _active_stt_settings(monkeypatch)
+        seen = {}
+
+        async def fake_transcribe(audio_bytes, mime_type="audio/webm"):
+            seen["audio_bytes"] = audio_bytes
+            seen["mime_type"] = mime_type
+            return {"text": "hello world", "language": "en",
+                    "language_probability": 0.9}
+
+        monkeypatch.setattr(stt_router, "transcribe_audio", fake_transcribe)
+
+        resp = client.post(
+            "/api/stt",
+            files={"file": ("audio.ogg", b"raw-audio", "audio/ogg")},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"text": "hello world", "language": "en",
+                               "language_probability": 0.9}
+        assert seen["audio_bytes"] == b"raw-audio"
+        assert seen["mime_type"] == "audio/ogg"
+
+    def test_audio_mime_type_field_overrides_part_content_type(self, client, monkeypatch):
+        """Browsers that attach a bare octet-stream still name the codec."""
+        _active_stt_settings(monkeypatch)
+        seen = {}
+
+        async def fake_transcribe(audio_bytes, mime_type="audio/webm"):
+            seen["mime_type"] = mime_type
+            return {"text": "x", "language": "en", "language_probability": None}
+
+        monkeypatch.setattr(stt_router, "transcribe_audio", fake_transcribe)
+
+        resp = client.post(
+            "/api/stt",
+            files={"file": ("audio.bin", b"raw-audio", "application/octet-stream")},
+            data={"audio_mime_type": "audio/webm"},
+        )
+
+        assert resp.status_code == 200
+        assert seen["mime_type"] == "audio/webm"
+
+    def test_multipart_without_file_part_400(self, client, monkeypatch):
+        _active_stt_settings(monkeypatch)
+
+        async def unreachable(audio_bytes, mime_type="audio/webm"):
+            raise AssertionError("STT must not be called without audio")
+
+        monkeypatch.setattr(stt_router, "transcribe_audio", unreachable)
+
+        resp = client.post("/api/stt", files={"wrong_name": ("a.webm", b"x", "audio/webm")})
+        assert resp.status_code == 400
+
+    def test_multipart_inactive_503(self, client):
+        resp = client.post("/api/stt", files={"file": ("a.webm", b"x", "audio/webm")})
+        assert resp.status_code == 503
+
 
 async def _coro(value):
     return value

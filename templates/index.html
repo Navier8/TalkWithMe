@@ -448,6 +448,10 @@
     <script src="/static/state.js"></script>
     <script src="/static/utils.js"></script>
     <script src="/static/theme.js"></script>
+    <!-- latency.js defines the `latency` object that chat.js, stt.js and
+         tts.js call unconditionally (it no-ops when debug_latency is off).
+         It must load before them or sendMessage() throws on its first line. -->
+    <script src="/static/latency.js"></script>
     <script src="/static/persistence.js"></script>
     <script src="/static/tts.js"></script>
     <script src="/static/stt.js"></script>

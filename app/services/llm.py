@@ -22,23 +22,36 @@ from typing import AsyncGenerator, Dict, List, Optional
 import httpx
 
 from app.config import Persona, get_settings
-from app.services import builtin, llm_auth, mcp_client
+from app.services import builtin, http_pool, llm_auth, mcp_client
 from app.services.tool_registry import get_server_for_tool
 
 logger = logging.getLogger(__name__)
 
 
+# Timeouts for the two kinds of LLM call. Named because they key pooled
+# clients (app/services/http_pool.py): a generation may run for minutes,
+# the router's 16-token pick must not.
+_STREAM_TIMEOUT_S = 120.0
+_ROUTER_TIMEOUT_S = 15.0
+
+
 def _llm_client(timeout: float) -> httpx.AsyncClient:
-    """A fresh AsyncClient for one LLM call.
+    """The pooled AsyncClient for LLM calls at this timeout.
+
+    SHARED — callers must use it directly, never as a context manager: an
+    ``async with`` would close the pool's client and break every later
+    call. A chat turn makes one request per persona plus one for the
+    router, and each of those used to open its own connection.
 
     Carries the API key (docs/feature_api_key.md) as an Authorization
     header when one is configured. The key is resolved once per process
     by llm_auth, so the header is either present on every request this
-    process makes or on none — there is no mid-process drift.
+    process makes or on none — there is no mid-process drift, which is
+    exactly what makes it safe to bake into a pooled client.
     """
     key = llm_auth.get_llm_api_key()
     headers = {"Authorization": f"Bearer {key}"} if key else None
-    return httpx.AsyncClient(timeout=timeout, headers=headers)
+    return http_pool.get_client("llm", timeout, headers)
 
 
 # Distinct base_urls that already produced the cleartext warning: the user
@@ -67,15 +80,98 @@ def warn_if_plaintext_llm(base_url: Optional[str]) -> None:
 
 
 def _base_payload(messages: List[dict]) -> dict:
-    """Common /v1/chat/completions payload fields (model, sampling, streaming)."""
+    """Common /v1/chat/completions payload fields (model, sampling, streaming).
+
+    `cache_prompt` asks llama.cpp to keep the processed prompt in its KV
+    cache and reuse the longest common prefix on the next request. It
+    matters most in a multi-persona room: each persona carries its own
+    system prompt, so without it every persona switch reprocesses the
+    whole prompt from scratch, once per reply per turn. llama-server
+    assigns requests to the slot with the longest matching prefix, so
+    running it with `--parallel N` (one slot per persona in the room, plus
+    one for the router) lets each persona keep its own warm slot and
+    collapses prompt processing to just the new turn.
+
+    It is a llama.cpp extension, not part of the OpenAI schema. Most
+    compatible servers ignore fields they do not know, but strict ones
+    (the hosted APIs among them) reject the whole request instead — and
+    this app supports a remote LLM. So it is sent optimistically and
+    withdrawn on the first rejection: see _retry_without_cache_prompt().
+    """
     settings = get_settings()
-    return {
+    payload = {
         "model": settings.llm.model,
         "messages": messages,
         "max_tokens": settings.llm.max_tokens,
         "temperature": settings.llm.temperature,
         "stream": True,
     }
+    _add_cache_prompt(payload, settings.llm.base_url)
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# cache_prompt negotiation
+# ---------------------------------------------------------------------------
+#
+# base_urls that answered 400 to a payload carrying `cache_prompt`. The
+# field is withdrawn for the rest of the process for those, so the cost of
+# discovering an incompatible server is exactly one retried request, not
+# one per chat turn.
+
+_no_cache_prompt_urls: set = set()
+
+
+def _add_cache_prompt(payload: dict, base_url: Optional[str]) -> None:
+    """Add `cache_prompt` unless this base_url already rejected it."""
+    if (base_url or "") not in _no_cache_prompt_urls:
+        payload["cache_prompt"] = True
+
+
+def _retry_without_cache_prompt(
+    exc: Exception, base_url: Optional[str], payload: dict,
+) -> Optional[dict]:
+    """A payload to retry with, or None to let the original error stand.
+
+    Only a 400 on a request that actually carried `cache_prompt` counts: a
+    400 for any other reason is a real error, and retrying it would just
+    produce the same 400 with an extra round-trip. Remembers the verdict
+    so the field is not offered to this server again.
+    """
+    if "cache_prompt" not in payload:
+        return None
+    if not isinstance(exc, httpx.HTTPStatusError) or exc.response.status_code != 400:
+        return None
+    url = base_url or ""
+    if url not in _no_cache_prompt_urls:
+        _no_cache_prompt_urls.add(url)
+        logger.info(
+            "LLM at %s rejected the llama.cpp `cache_prompt` field; retrying "
+            "without it and omitting it from now on (prompt caching is "
+            "unavailable on this server)",
+            url or "<unset>",
+        )
+    return {k: v for k, v in payload.items() if k != "cache_prompt"}
+
+
+async def _stream_completion_chunks(
+    client: httpx.AsyncClient, url: str, payload: dict,
+) -> AsyncGenerator[dict, None]:
+    """One streamed request: yield `choices[0]` per SSE data line."""
+    async with client.stream("POST", url, json=payload) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if not line or not line.startswith("data: "):
+                continue
+            data_str = line[len("data: "):]
+            if data_str.strip() == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data_str)
+                yield chunk["choices"][0]
+            except (json.JSONDecodeError, KeyError, IndexError) as exc:
+                logger.warning("Malformed SSE chunk from LLM: %s", exc)
+                continue
 
 
 async def _iter_completion_chunks(payload: dict) -> AsyncGenerator[dict, None]:
@@ -83,25 +179,27 @@ async def _iter_completion_chunks(payload: dict) -> AsyncGenerator[dict, None]:
 
     Each dict carries the "delta" and, on the final line, "finish_reason".
     Malformed lines are logged and skipped rather than aborting the stream.
+
+    A 400 caused by the optimistic `cache_prompt` field is retried once
+    without it. The status is checked before any chunk is yielded, so the
+    retry cannot replay tokens the caller has already seen.
     """
     settings = get_settings()
-    url = f"{settings.llm.base_url}/v1/chat/completions"
+    base_url = settings.llm.base_url
+    url = f"{base_url}/v1/chat/completions"
+    client = _llm_client(timeout=_STREAM_TIMEOUT_S)
 
-    async with _llm_client(timeout=120.0) as client:
-        async with client.stream("POST", url, json=payload) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line or not line.startswith("data: "):
-                    continue
-                data_str = line[len("data: "):]
-                if data_str.strip() == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data_str)
-                    yield chunk["choices"][0]
-                except (json.JSONDecodeError, KeyError, IndexError) as exc:
-                    logger.warning("Malformed SSE chunk from LLM: %s", exc)
-                    continue
+    try:
+        async for choice in _stream_completion_chunks(client, url, payload):
+            yield choice
+        return
+    except Exception as exc:
+        retry_payload = _retry_without_cache_prompt(exc, base_url, payload)
+        if retry_payload is None:
+            raise
+
+    async for choice in _stream_completion_chunks(client, url, retry_payload):
+        yield choice
 
 
 async def stream_chat(
@@ -133,13 +231,25 @@ async def chat_completion(messages: List[Dict[str, str]], max_tokens: int = 64) 
         "temperature": 0.1,  # Low temperature for deterministic routing
         "stream": False,
     }
+    # Same KV-cache reuse as the streaming path (see _base_payload). The
+    # router prompt is stable apart from its trailing conversation context,
+    # so the prefix it can reuse is most of itself.
+    _add_cache_prompt(payload, settings.llm.base_url)
 
     try:
-        async with _llm_client(timeout=15.0) as client:
+        client = _llm_client(timeout=_ROUTER_TIMEOUT_S)
+        try:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
-            body = resp.json()
-            return body["choices"][0]["message"]["content"]
+        except Exception as exc:
+            retry_payload = _retry_without_cache_prompt(
+                exc, settings.llm.base_url, payload)
+            if retry_payload is None:
+                raise
+            resp = await client.post(url, json=retry_payload)
+            resp.raise_for_status()
+        body = resp.json()
+        return body["choices"][0]["message"]["content"]
     except Exception as exc:
         logger.warning("LLM non-streaming call failed: %s", exc)
         return ""

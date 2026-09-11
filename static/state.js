@@ -32,6 +32,11 @@ let roomPersonas = {};
 // Microphone / STT state
 let mediaRecorder = null;
 let recordedChunks = [];
+// The mic stream is acquired ONCE and kept (see stt.js): getUserMedia costs
+// 100-300 ms of device negotiation, and paying it on every press put that
+// delay between the user pressing record and the recorder actually running.
+// Its tracks are disabled between turns, so nothing is captured while idle.
+let micStream = null;
 
 // Non-streaming: FIFO audio queue
 const audioQueue = [];
@@ -41,11 +46,27 @@ let isPlayingAudio = false;
 // Streaming TTS state
 let sentenceBuffer = "";
 let currentStreamingPersona = null;
+// True until the current reply has queued its FIRST chunk. The first chunk
+// is split aggressively (see extractTTSChunks in tts.js) because nothing
+// can play until it has been synthesized; later chunks use sentence
+// granularity, which sounds better. Reset on each "start" event.
+let ttsFirstChunkPending = true;
 
-// Streaming: decoupled fetch queue and decoded-buffer playback queue
+// Streaming: decoupled fetch queue and decoded-buffer playback queue.
+//
+// Fetches run CONCURRENTLY (up to TTS_MAX_CONCURRENT_FETCHES) so synthesis
+// of the next chunk overlaps playback of the current one, but playback must
+// still be in order — so each queued chunk carries a sequence number, and
+// the player waits for the sequence it wants rather than taking whatever
+// finished first.
 const ttsRequestQueue = [];
-const audioBufferQueue = [];
-let isFetchingTTS = false;
+let ttsNextSeq = 0;        // sequence stamped on the next enqueued chunk
+let ttsNextPlaySeq = 0;    // sequence the player is waiting for
+let ttsInFlight = 0;       // fetches currently running
+// seq -> decoded AudioBuffer, or null for a chunk whose fetch produced no
+// audio (the player must skip it, not stall forever waiting for it).
+const ttsReadyBuffers = new Map();
+let isFetchingTTS = false; // derived: ttsInFlight > 0 (read by latency.js)
 let isPlayingAudioBuffer = false;
 
 // Chat persistence — track message IDs for audio association
