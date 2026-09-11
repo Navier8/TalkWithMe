@@ -576,11 +576,13 @@ standalone script under `impl/` with per-engine install notes.
   - Major changes to Persona persistence (#87)
   - Fix longstanding display issues in Persona/Chat Room modals (#94)
   - Bump dependency versions to something less ancient (#81)
-- **Work in progress, update with release date when ready** v7.0
+- **2026-09-10** v7.0
   - Dynamic UI for TTS server configuration via `tts-serve` (#86)
   - Allow deletion of individual messages in a chat (#99)
-  - Bug fix: two chatroom deletion issues (#105)
   - Add API key option for LLM connections (#100)
+  - Add global system prompt option (#101)
+  - Bug fix: cloning a persona should rename its directory (#102)
+  - Bug fix: two chatroom deletion issues (#105)
 
 ## License
 
