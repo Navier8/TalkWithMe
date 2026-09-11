@@ -11,3 +11,8 @@ chat_rooms:
   - Luna
   - Alex
   echo_chamber: false
+- name: Test2
+  persona_names:
+  - Kirk
+  - McCoy
+  echo_chamber: true

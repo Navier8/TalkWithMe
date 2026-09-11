@@ -14,7 +14,10 @@ restore.sh
 startup.sh
 llm_api_key
 
-# Secrets — never commit. See .env.example for the template.
+# Secrets — never commit. The LLM API key is resolved by
+# app/services/llm_auth.py from the TALKWITHME_LLM_API_KEY env var or the
+# llm_api_key file (ignored above; llm_api_key.example is the template).
+# .env is kept ignored for anyone who sources their env vars from one.
 .env
 
 # Codebase indexing cache (codebase-memory-mcp)

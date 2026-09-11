@@ -103,6 +103,7 @@ general:
   max_persona_replies: 1
   max_turns_for_context: 6
   show_tool_calls: true
+  debug_latency: false
   # Hands-free listening (see "Voice activation" below). Off by default.
   voice_activation: false
   vad_sensitivity: 3      # 1-5: how far above the room's noise your voice must be
@@ -515,6 +516,28 @@ offered to the LLM on every round, and the result of each built-in tool invocati
 of the console with `grep "Persona memory"`. That trail tells you quickly whether the tool was
 never offered to the LLM at all, or was offered but the model chose not to call it (which is
 often a model/prompt issue rather than an app issue).
+
+### Measuring voice latency
+
+Set `general.debug_latency: true` (in `settings.yaml` or the **Settings** dialog — "Log latency
+breakdown") to time the full voice round-trip. It spans three separate HTTP requests that the
+browser orchestrates, so the end-to-end number is logged **in the browser dev console**, once per
+turn, as a per-stage breakdown:
+
+```
+[latency] voice round-trip: 4231 ms   (start = mic stop)
+  STT transcription          812 ms
+  → LLM first token          640 ms
+  LLM token streaming       1120 ms
+  first TTS audio playing   2050 ms   (from start)
+  TTS synth (1st sentence)   430 ms
+  TTS tail after LLM done    709 ms
+```
+
+The clock starts when the microphone stops (or, for a typed message, when you hit send) and stops
+when the last synthesized audio finishes playing. With the same flag on, the STT and TTS proxies
+also log their individual upstream call durations to the server console at INFO (prefixed
+`[latency]`). The flag is off by default — it is pure noise unless you are actively measuring.
 
 ### Notes and gotchas
 
