@@ -14,8 +14,7 @@ Follow the development of this app on my YouTube channel:
 - MCP integrations: https://www.youtube.com/watch?v=XhD9soU3hFM
 - Externalizing persona persistence: https://www.youtube.com/watch?v=Vj9rUy06Dcw
 - Adding persistent memories: https://www.youtube.com/watch?v=YD6cInSuQZs
-- Generifying the TTS server settings: (TODO video link here when ready)
-- Adding emotion to cloned AI voices: (TODO video link here when ready)
+- Generifying TTS settings / cloning voices with emotion: https://www.youtube.com/watch?v=WuIiyz9ESfQ
 
 ## Features
 
@@ -33,11 +32,7 @@ Follow the development of this app on my YouTube channel:
 
 - Python 3.10+
 - A locally running llama.cpp server with OpenAI-compatible API (e.g., `--api` flag)
-- (Optional) A local TTS REST server with `/synthesize`, `/health`, and
-   `/capabilities` endpoints. Use one of the [tts-serve](https://github.com/scorbo2/tts-serve)
-   server scripts, running in front of [dots.tts](https://github.com/rednote-hilab/dots.tts),
-   [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS), [OmniVoice](https://github.com/k2-fsa/OmniVoice),
-   or [Chatterbox](https://github.com/resemble-ai/chatterbox).
+- (Optional) A running [tts-serve](https://github.com/scorbo2/tts-serve) instance (for TTS output).
 - (Optional) An OpenAI-compatible STT server that exposes a `/v1/audio/transcriptions` endpoint
    accepting multipart form uploads. The `stt.base_url` in `settings.yaml` should point to the
    server's root (e.g., `http://localhost:8181`), and the app will POST to
@@ -172,15 +167,8 @@ and/or `seed` directly under `tts:` loads fine: those keys are folded into
 `parameters` at startup and rewritten in the new shape on the next settings
 save.
 
-The engines supported out of the box (one standalone script each, in
-[tts-serve](https://github.com/scorbo2/tts-serve)):
-
-| Engine | Server script | Sample rate | Notes |
-|--------|---------------|-------------|-------|
-| Chatterbox | `impl/server_chatterbox.py` | 24 kHz | Multilingual (23 language codes); output is PerTh-watermarked by the library |
-| OmniVoice | `impl/server_omnivoice.py` | 24 kHz | The fastest of the four; auto-transcribes the reference clip when the transcript is omitted |
-| Qwen3-TTS | `impl/server_qwen3TTS.py` | 24 kHz | 10 language names + `auto`; falls back to speaker-embedding cloning when the transcript is omitted |
-| dots.tts | `impl/server_dotsTTS.py` | 48 kHz | Flow-matching knobs (`num_steps`, `ode_method`, guidance/speaker scales) |
+Refer to the [tts-serve](https://github.com/scorbo2/tts-serve) documentation
+to see the full list of supported TTS servers!
 
 ### Personas
 
