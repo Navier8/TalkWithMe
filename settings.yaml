@@ -6,11 +6,12 @@ llm:
 tts:
   enabled: true
   base_url: http://127.0.0.1:8181
-  num_steps: 14
-  guidance_scale: 1.5
-  seed: null
   timeout: 120.0
   streaming: true
+  parameters:
+    num_steps: 14
+    guidance_scale: 1.5
+    denoise: true
 stt:
   enabled: true
   base_url: http://127.0.0.1:5000
@@ -21,8 +22,9 @@ general:
   max_turns_for_context: 6
   show_tool_calls: true
   enable_persona_memories: true
-  personas_directory: null
+  global_system_prompt: ''
   debug_latency: true
+  personas_directory: null
   voice_activation: false
   vad_sensitivity: 3
   vad_silence_ms: 900

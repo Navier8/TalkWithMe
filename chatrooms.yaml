@@ -5,7 +5,7 @@ chat_rooms:
   - Spock
   - Scotty
   - McCoy
-  echo_chamber: false
+  echo_chamber: true
 - name: Simple
   persona_names:
   - Luna
