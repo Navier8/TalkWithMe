@@ -37,6 +37,30 @@ let recordedChunks = [];
 // delay between the user pressing record and the recorder actually running.
 // Its tracks are disabled between turns, so nothing is captured while idle.
 let micStream = null;
+// True while a recorded blob is being transcribed by /api/stt. The voice
+// detector treats it as "busy" so a second capture can't start on top of
+// the first (both would share mediaRecorder and recordedChunks).
+let sttInFlight = false;
+
+// Voice activation / VAD state (see vad.js, docs/feature_voice_activation.md)
+//
+// handsFreeEnabled is the user-facing switch; the rest is the detector's
+// machinery. voiceActivationEnabled/vadSensitivity/vadSilenceMs mirror the
+// general.* settings and are refreshed by app.js and gen-settings.js.
+let handsFreeEnabled = false;
+let voiceActivationEnabled = false;
+let vadSensitivity = 3;
+let vadSilenceMs = 900;
+let vadState = null;        // pure detector state (createVadState in vad.js)
+let vadAudioCtx = null;
+let vadAnalyser = null;
+let vadSource = null;
+let vadFrame = null;        // reused Float32Array for getFloatTimeDomainData
+let vadTimer = null;        // setInterval handle; non-null means "running"
+let vadLastTickAt = 0;
+let vadBusyUntil = 0;       // detection stays suspended until this timestamp
+let vadCaptureActive = false;   // the current recording was started by the VAD
+let vadDiscardCapture = false;  // ...and its blob is to be thrown away
 
 // Non-streaming: FIFO audio queue
 const audioQueue = [];
@@ -86,6 +110,7 @@ const messagesEl = document.getElementById("messages");
 const inputEl = document.getElementById("message-input");
 const sendBtn = document.getElementById("btn-send");
 const micBtn = document.getElementById("btn-mic");
+const voiceBtn = document.getElementById("btn-voice");
 const newChatBtn = document.getElementById("btn-new-chat");
 const ttsToggleBtn = document.getElementById("btn-tts-toggle");
 const ttsIcon = document.getElementById("tts-icon");
@@ -188,3 +213,6 @@ const gsfGlobalSystemPrompt = document.getElementById("gsf-global-system-prompt"
 const gsfShowToolCalls = document.getElementById("gsf-show-tool-calls");
 const gsfEnablePersonaMemories = document.getElementById("gsf-enable-persona-memories");
 const gsfDebugLatency = document.getElementById("gsf-debug-latency");
+const gsfVoiceActivation = document.getElementById("gsf-voice-activation");
+const gsfVadSensitivity = document.getElementById("gsf-vad-sensitivity");
+const gsfVadSilenceMs = document.getElementById("gsf-vad-silence-ms");

@@ -22,7 +22,7 @@ Follow the development of this app on my YouTube channel:
 - Set up chat rooms and assign personas to them
 - Smart persona routing: let the LLM decide, pick randomly, or choose manually
 - Optional TTS: AI responses spoken aloud via a TTS server
-- Optional STT: Click the microphone icon to speak your prompt
+- Optional STT: Click the microphone icon to speak your prompt — or turn on hands-free voice activation and just talk
 - Optional MCP tools: let any persona call tools served by MCP servers (e.g. fetch web pages, run queries)
 - Fully local — no internet required, no authentication. You can connect to remote LLMs with an API key if you wish, but TalkWithMe can be run 100% locally. NOTE: only connect to remote LLMs that you trust.
 - Theme chooser in the top-right: Dark (default), Light, Matrix, and Blues
@@ -103,6 +103,10 @@ general:
   max_persona_replies: 1
   max_turns_for_context: 6
   show_tool_calls: true
+  # Hands-free listening (see "Voice activation" below). Off by default.
+  voice_activation: false
+  vad_sensitivity: 3      # 1-5: how far above the room's noise your voice must be
+  vad_silence_ms: 900     # 300-3000: quiet time that ends your turn
   personas_directory: Personas/
 
 mcp:
@@ -440,6 +444,48 @@ In streaming mode, there will be one replay icon per sentence in the response. C
 will play the respective sentence:
 
 ![Chat replay streaming](screenshots/chat_audio_replay_streaming.png)
+
+## Voice activation (hands-free)
+
+Next to the microphone button is a hands-free button (👂). Turn it on and you can
+stop clicking: the browser keeps the microphone open, starts recording when you
+start speaking, and stops — transcribing and sending the message — when you stop.
+`Ctrl+Shift+Space` toggles it; `Ctrl+Space` still records a single message the
+old way, and clicking the microphone during a hands-free capture ends that
+capture immediately instead of waiting out the silence.
+
+Listening pauses automatically while a reply is being written or spoken, and
+resumes shortly after the audio finishes. This is deliberate: browser echo
+cancellation cannot be relied on with external speakers, and without the pause
+the app hears its own voice and answers itself in a loop. Talking over a reply to
+interrupt it ("barge-in") is therefore not supported.
+
+The button shows what the detector is doing: a ring that grows with your voice
+while it is listening, a pulse while it is recording, and dimmed while it is
+paused during a reply.
+
+Two settings in the General settings dialog tune it:
+
+- **Microphone Sensitivity** (1–5, default 3) — how far above the room's own
+  background noise your voice has to be. Raise it if speech is missed; lower it
+  if the room itself keeps starting recordings. Thresholds are relative to a
+  continuously measured noise floor, so the same number works in a quiet study
+  and a noisy kitchen.
+- **End-of-Speech Silence** (300–3000 ms, default 900) — how long you have to be
+  quiet before your turn is considered over. Too short cuts you off at a comma;
+  too long delays every reply.
+
+Enable **Hands-free voice activation** in the same dialog (or set
+`general.voice_activation: true`) to have listening start automatically on every
+page load. It is off by default, and if the browser will not grant the microphone
+without a click, the button is right there — one click starts it.
+
+Note that hands-free needs the STT server: if it becomes unavailable, or a
+transcription fails, listening switches itself off rather than failing silently
+on every sentence. Energy-based detection also reacts to *any* voice, so in a
+room with other people talking, push-to-talk is still the better choice.
+
+Details and tuning constants: [docs/feature_voice_activation.md](docs/feature_voice_activation.md).
 
 ## Echo chamber
 

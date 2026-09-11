@@ -229,6 +229,12 @@ class GeneralSettingsRequest(BaseModel):
     # clear the prompt by saving a blank textarea.
     global_system_prompt: Optional[str] = None
     debug_latency: Optional[bool] = None
+    # Voice activation (docs/feature_voice_activation.md). The bounds match
+    # GeneralConfig's; a client sending 0 or 99 gets a 422 rather than the
+    # silent clamp that hand-edited YAML gets — the UI has no excuse.
+    voice_activation: Optional[bool] = None
+    vad_sensitivity: Optional[int] = Field(default=None, ge=1, le=5)
+    vad_silence_ms: Optional[int] = Field(default=None, ge=300, le=3000)
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -272,6 +278,9 @@ class GeneralSettingsResponse(BaseModel):
     enable_persona_memories: bool
     global_system_prompt: str
     debug_latency: bool
+    voice_activation: bool
+    vad_sensitivity: int
+    vad_silence_ms: int
 
 
 class SettingsResponse(BaseModel):

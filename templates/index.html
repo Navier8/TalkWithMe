@@ -83,6 +83,7 @@
                         rows="1"
                     ></textarea>
 <button id="btn-mic" type="button" aria-label="Record voice message" title="Record voice message" class="icon-btn">&#127908;</button>
+                    <button id="btn-voice" type="button" aria-label="Hands-free listening" title="Hands-free listening (voice activation)" class="icon-btn" aria-pressed="false">&#128066;</button>
                     <button id="btn-send" title="Send message">&#9654;</button>
                 </div>
             </main>
@@ -433,6 +434,26 @@
                             <span class="field-hint">Print STT, LLM, and TTS timing details to the browser console and server log.</span>
                         </div>
                     </fieldset>
+                    <fieldset class="settings-section">
+                        <legend>Voice</legend>
+                        <div class="form-row">
+                            <label class="settings-checkbox-label">
+                                <input id="gsf-voice-activation" type="checkbox">
+                                <span>Hands-free voice activation</span>
+                            </label>
+                            <span class="field-hint">Start listening as soon as the page loads, and record whenever you speak — no need to press the microphone. Listening pauses while a reply is being written or spoken.</span>
+                        </div>
+                        <div class="form-row">
+                            <label for="gsf-vad-sensitivity">Microphone Sensitivity <span class="field-hint">(1–5)</span></label>
+                            <input id="gsf-vad-sensitivity" type="number" min="1" max="5" required>
+                            <span class="field-hint">How far above the room's own noise your voice must be. Raise it if speech is missed, lower it if the room triggers recording.</span>
+                        </div>
+                        <div class="form-row">
+                            <label for="gsf-vad-silence-ms">End-of-Speech Silence <span class="field-hint">(300–3000 ms)</span></label>
+                            <input id="gsf-vad-silence-ms" type="number" min="300" max="3000" step="50" required>
+                            <span class="field-hint">Quiet time that ends your turn. Too short cuts you off mid-sentence; too long delays every reply.</span>
+                        </div>
+                    </fieldset>
                 </div>
                 <div class="form-actions">
                     <button type="button" id="gen-settings-btn-cancel" class="btn-secondary">Cancel</button>
@@ -454,6 +475,10 @@
     <script src="/static/latency.js"></script>
     <script src="/static/persistence.js"></script>
     <script src="/static/tts.js"></script>
+    <!-- vad.js is loaded before stt.js for readability only: both are
+         plain scripts of function declarations, and nothing runs until
+         app.js wires the buttons up. -->
+    <script src="/static/vad.js"></script>
     <script src="/static/stt.js"></script>
     <script src="/static/chat.js"></script>
     <script src="/static/persona.js"></script>

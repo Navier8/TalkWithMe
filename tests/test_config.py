@@ -314,6 +314,74 @@ class TestGeneralConfigEnablePersonaMemories:
         assert "enable_persona_memories" not in caplog.text
 
 
+class TestGeneralConfigVoiceActivation:
+    """general.voice_activation / vad_sensitivity / vad_silence_ms
+    (docs/feature_voice_activation.md).
+
+    The two numbers are the ones a user tweaks by feel in settings.yaml, so
+    an out-of-range value is CLAMPED with a warning rather than raised: a
+    ValidationError here takes the whole app down, and with it the UI the
+    value would have been fixed from. The API, which has a form to reject
+    into, still 422s (see test_routers_settings.py)."""
+
+    def test_defaults_are_off_and_middling(self):
+        cfg = GeneralConfig()
+        assert cfg.voice_activation is False
+        assert cfg.vad_sensitivity == 3
+        assert cfg.vad_silence_ms == 900
+
+    @pytest.mark.parametrize("value", [1, 3, 5])
+    def test_in_range_sensitivity_preserved(self, value):
+        assert GeneralConfig(vad_sensitivity=value).vad_sensitivity == value
+
+    @pytest.mark.parametrize("value", [300, 900, 3000])
+    def test_in_range_silence_preserved(self, value):
+        assert GeneralConfig(vad_silence_ms=value).vad_silence_ms == value
+
+    @pytest.mark.parametrize("value,expected", [(0, 1), (-4, 1), (6, 5), (99, 5)])
+    def test_out_of_range_sensitivity_clamped_with_warning(self, value, expected, caplog):
+        with caplog.at_level(logging.WARNING):
+            cfg = GeneralConfig(vad_sensitivity=value)
+        assert cfg.vad_sensitivity == expected
+        assert "vad_sensitivity" in caplog.text
+
+    @pytest.mark.parametrize("value,expected", [(0, 300), (100, 300), (60000, 3000)])
+    def test_out_of_range_silence_clamped_with_warning(self, value, expected, caplog):
+        with caplog.at_level(logging.WARNING):
+            cfg = GeneralConfig(vad_silence_ms=value)
+        assert cfg.vad_silence_ms == expected
+        assert "vad_silence_ms" in caplog.text
+
+    @pytest.mark.parametrize("value", ["3", None, 2.5, [], True])
+    def test_non_integer_falls_back_to_default_with_warning(self, value, caplog):
+        # True is deliberately rejected: bool is an int in Python, but
+        # "vad_sensitivity: yes" is a typo, not a sensitivity of 1.
+        with caplog.at_level(logging.WARNING):
+            cfg = GeneralConfig(vad_sensitivity=value)
+        assert cfg.vad_sensitivity == 3
+        assert "invalid general.vad_sensitivity" in caplog.text
+
+    def test_absent_keys_keep_defaults_without_warning(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            cfg = GeneralConfig(show_tool_calls=False)
+        assert cfg.vad_sensitivity == 3
+        assert cfg.vad_silence_ms == 900
+        assert "vad_" not in caplog.text
+
+    def test_voice_activation_survives_a_yaml_round_trip(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(app_config, "_PROJECT_ROOT", tmp_path)
+        settings = AppSettings()
+        settings.general.voice_activation = True
+        settings.general.vad_sensitivity = 4
+        settings.general.vad_silence_ms = 1200
+        app_config.save_settings(settings)
+
+        reloaded = app_config.load_settings(tmp_path / "settings.yaml")
+        assert reloaded.general.voice_activation is True
+        assert reloaded.general.vad_sensitivity == 4
+        assert reloaded.general.vad_silence_ms == 1200
+
+
 # ---------------------------------------------------------------------------
 # MCP server config validation
 # ---------------------------------------------------------------------------

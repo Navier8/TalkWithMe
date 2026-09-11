@@ -56,6 +56,9 @@ async function loadGenSettingsIntoForm() {
         gsfEnablePersonaMemories.checked = data.general.enable_persona_memories ?? true;
         gsfGlobalSystemPrompt.value = data.general.global_system_prompt ?? "";
         gsfDebugLatency.checked = data.general.debug_latency ?? false;
+        gsfVoiceActivation.checked = data.general.voice_activation ?? false;
+        gsfVadSensitivity.value = data.general.vad_sensitivity ?? 3;
+        gsfVadSilenceMs.value = data.general.vad_silence_ms ?? 900;
         return true;
     } catch (err) {
         console.error("Failed to load settings:", err);
@@ -87,6 +90,16 @@ async function submitGenSettings(e) {
         return showGenSettingsError("Max Turns for Context must be between 1 and 50.");
     }
 
+    const sensitivity = parseInt(gsfVadSensitivity.value, 10);
+    if (isNaN(sensitivity) || sensitivity < 1 || sensitivity > 5) {
+        return showGenSettingsError("Microphone Sensitivity must be between 1 and 5.");
+    }
+
+    const silenceMs = parseInt(gsfVadSilenceMs.value, 10);
+    if (isNaN(silenceMs) || silenceMs < 300 || silenceMs > 3000) {
+        return showGenSettingsError("End-of-Speech Silence must be between 300 and 3000 ms.");
+    }
+
     // Fetch current full settings so we can patch only the general section
     let current;
     try {
@@ -113,6 +126,9 @@ async function submitGenSettings(e) {
             // cleared textarea could never actually clear the prompt.
             global_system_prompt: gsfGlobalSystemPrompt.value,
             debug_latency: gsfDebugLatency.checked,
+            voice_activation: gsfVoiceActivation.checked,
+            vad_sensitivity: sensitivity,
+            vad_silence_ms: silenceMs,
         },
     };
 
@@ -133,6 +149,24 @@ async function submitGenSettings(e) {
         personaNameMentionsEnabled = gsfPersonaNameMentions.checked;
         maxPersonaReplies = maxReplies;
         maxTurnsForContext = maxTurns;
+        debugLatencyEnabled = gsfDebugLatency.checked;
+        voiceActivationEnabled = gsfVoiceActivation.checked;
+        vadSensitivity = sensitivity;
+        vadSilenceMs = silenceMs;
+        // Re-arm a running detector with the new thresholds, and follow the
+        // checkbox: saving the setting is how the user expects to turn
+        // hands-free on and off for good, not just for this page load.
+        applyVoiceSettings();
+        if (voiceActivationEnabled && !handsFreeEnabled) {
+            // The Save click is the user gesture that lets the audio
+            // context start; a failure here is reported, not swallowed.
+            if (!await enableHandsFree()) {
+                showGenSettingsError("Settings saved, but hands-free listening could not start — check microphone access.");
+                return;
+            }
+        } else if (!voiceActivationEnabled && handsFreeEnabled) {
+            disableHandsFree();
+        }
 
         closeGenSettings();
     } catch (err) {

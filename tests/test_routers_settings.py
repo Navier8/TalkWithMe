@@ -15,6 +15,8 @@ engine switch is never bricked by a stale doc.
 
 import logging
 
+import pytest
+
 from app.config import MCPConfig, MCPServerConfig
 from tests.factories import make_capabilities_doc, make_mcp_server, make_settings
 
@@ -80,6 +82,9 @@ class TestGetSettings:
             "enable_persona_memories": True,
             "global_system_prompt": "",
             "debug_latency": False,
+            "voice_activation": False,
+            "vad_sensitivity": 3,
+            "vad_silence_ms": 900,
         }
 
 
@@ -115,6 +120,9 @@ class TestUpdateSettings:
         current.general.enable_persona_memories = False  # non-default: preserved?
         current.general.global_system_prompt = "No markdown, plain text only."  # non-default: preserved?
         current.general.debug_latency = True
+        current.general.voice_activation = True    # non-default: preserved?
+        current.general.vad_sensitivity = 5
+        current.general.vad_silence_ms = 1500
         monkeypatch.setattr(app_config, "_settings_cache", current)
 
         resp = client.put("/api/settings", json=base_update(
@@ -129,6 +137,9 @@ class TestUpdateSettings:
             "enable_persona_memories": False, # preserved
             "global_system_prompt": "No markdown, plain text only.",  # preserved
             "debug_latency": True,            # preserved
+            "voice_activation": True,         # preserved
+            "vad_sensitivity": 5,             # preserved
+            "vad_silence_ms": 1500,           # preserved
         }
 
     def test_missing_general_section_preserves_everything(self, client, monkeypatch):
@@ -142,6 +153,9 @@ class TestUpdateSettings:
         current.general.enable_persona_memories = False  # must not reset to True
         current.general.global_system_prompt = "Plain text only."  # must not reset to ""
         current.general.debug_latency = True
+        current.general.voice_activation = True   # must not reset to False
+        current.general.vad_sensitivity = 1
+        current.general.vad_silence_ms = 2000
         monkeypatch.setattr(app_config, "_settings_cache", current)
 
         payload = base_update()
@@ -158,6 +172,9 @@ class TestUpdateSettings:
             "enable_persona_memories": False,
             "global_system_prompt": "Plain text only.",
             "debug_latency": True,
+            "voice_activation": True,
+            "vad_sensitivity": 1,
+            "vad_silence_ms": 2000,
         }
 
     def test_enable_persona_memories_round_trip(self, client):
@@ -218,6 +235,36 @@ class TestUpdateSettings:
         resp = client.put("/api/settings", json=base_update(
             general={"max_persona_replies": 99}))
         assert resp.status_code == 422
+
+    # -- voice activation (docs/feature_voice_activation.md) ----------------
+
+    def test_voice_activation_round_trip(self, client):
+        """The General settings dialog sends the whole general section:
+        hands-free settings must stick across a re-read."""
+        resp = client.put("/api/settings", json=base_update(general={
+            "voice_activation": True,
+            "vad_sensitivity": 4,
+            "vad_silence_ms": 1200,
+        }))
+        assert resp.status_code == 200
+        assert resp.json()["general"]["voice_activation"] is True
+
+        body = client.get("/api/settings").json()["general"]
+        assert body["voice_activation"] is True
+        assert body["vad_sensitivity"] == 4
+        assert body["vad_silence_ms"] == 1200
+
+    @pytest.mark.parametrize("general", [
+        {"vad_sensitivity": 0},
+        {"vad_sensitivity": 6},
+        {"vad_silence_ms": 299},
+        {"vad_silence_ms": 3001},
+    ])
+    def test_out_of_range_vad_values_rejected(self, client, general):
+        """Unlike a hand-edited settings.yaml (clamped, so startup survives),
+        an out-of-range value from the UI is a 422: there is a form to
+        report it on."""
+        assert client.put("/api/settings", json=base_update(general=general)).status_code == 422
 
     def test_llm_temperature_out_of_bounds_rejected(self, client):
         resp = client.put("/api/settings", json=base_update(

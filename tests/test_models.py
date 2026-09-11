@@ -151,6 +151,9 @@ class TestGeneralSettingsRequestPartialUpdate:
             "enable_persona_memories": None,
             "global_system_prompt": None,
             "debug_latency": None,
+            "voice_activation": None,
+            "vad_sensitivity": None,
+            "vad_silence_ms": None,
         }
 
     def test_general_settings_request_exclude_none_drops_omitted_fields(self):

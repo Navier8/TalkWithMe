@@ -671,6 +671,63 @@ html, body {
 }
 
 /* --------------------------------------------------------------------------
+   Hands-free button (voice activation — docs/feature_voice_activation.md)
+
+   Three states the user has to be able to tell apart at a glance:
+     .listening  armed, waiting for speech
+     .capturing  recording right now
+     .suspended  deliberately deaf while the assistant talks
+   The ring scales with --vad-level, which stt.js sets from the detector's
+   smoothed level — an always-visible answer to "can it hear me?".
+   -------------------------------------------------------------------------- */
+
+#btn-voice {
+    --vad-level: 0;
+    position: relative;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 1rem;
+    transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+    flex-shrink: 0;
+}
+
+#btn-voice:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+#btn-voice:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+#btn-voice.listening {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 calc(3px * var(--vad-level)) var(--accent);
+}
+
+#btn-voice.capturing {
+    background: var(--accent);
+    border-color: var(--accent);
+    animation: mic-pulse 1s infinite ease-in-out;
+}
+
+/* Muted, not animated: the app is talking, and the button should read as
+   "paused on purpose" rather than "broken". */
+#btn-voice.suspended {
+    opacity: 0.5;
+    box-shadow: none;
+}
+
+/* --------------------------------------------------------------------------
    Empty state
    -------------------------------------------------------------------------- */
 .empty-state {
