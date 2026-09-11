@@ -242,6 +242,193 @@ class TestConcurrency:
 
 
 # ---------------------------------------------------------------------------
+# delete_message
+# ---------------------------------------------------------------------------
+
+class TestDeleteMessage:
+    def test_deletes_target_row_and_its_audio_siblings_untouched(self):
+        persistence.persist_message("room1", ChatMessage(role="user", content="first"), "id-1")
+        persistence.persist_audio("room1", "id-1", B64_AUDIO, "audio/webm")
+        persistence.persist_message(
+            "room1", ChatMessage(role="assistant", content="second", persona="Luna"), "id-2"
+        )
+        persistence.persist_audio("room1", "id-2", B64_AUDIO, "audio/webm")
+
+        result = persistence.delete_message("room1", "id-1")
+
+        # The target row is gone from history.json...
+        assert result is True
+        msgs = persistence.load_history("room1")
+        assert [m["id"] for m in msgs] == ["id-2"]
+        assert msgs[0]["text"] == "second"
+        # ...and its audio file is off disk.
+        room_dir = persistence_root_path() / "room1"
+        assert not (room_dir / "id-1_0.webm").exists()
+        # The sibling's row AND audio file are untouched (text and disk).
+        assert msgs[0]["audio"] == ["id-2_0.webm"]
+        assert (room_dir / "id-2_0.webm").exists()
+
+    def test_returns_true_on_successful_delete(self):
+        persistence.persist_message("room1", ChatMessage(role="user", content="hi"), "id-1")
+
+        assert persistence.delete_message("room1", "id-1") is True
+
+    def test_unknown_message_id_returns_false_and_leaves_history_unchanged(self):
+        persistence.persist_message("room1", ChatMessage(role="user", content="a"), "id-1")
+        before = (persistence_root_path() / "room1" / "history.json").read_bytes()
+
+        result = persistence.delete_message("room1", "no-such-id")
+
+        assert result is False
+        # No write happened at all — the file is byte-identical.
+        assert (persistence_root_path() / "room1" / "history.json").read_bytes() == before
+        assert [m["id"] for m in persistence.load_history("room1")] == ["id-1"]
+
+    def test_missing_room_returns_false_without_raising_or_creating(self):
+        result = persistence.delete_message("never-existed", "id-1")
+
+        assert result is False
+        assert not (persistence_root_path() / "never-existed").exists()
+
+    def test_pre_row_staged_audio_attached_to_row_is_deleted_with_it(self):
+        # Audio uploaded before the row existed (the normal streaming-TTS /
+        # STT flow) is staged, then attached to the row when it lands:
+        staged = persistence.persist_audio("room1", "id-1", B64_AUDIO, "audio/webm")
+        assert staged.startswith("id-1_pending_")
+        persistence.persist_message("room1", ChatMessage(role="user", content="hi"), "id-1")
+        assert persistence.load_history("room1")[0]["audio"] == [staged]
+
+        result = persistence.delete_message("room1", "id-1")
+
+        assert result is True
+        assert not (persistence_root_path() / "room1" / staged).exists()
+        assert persistence.load_history("room1") == []
+
+    def test_delete_of_rowless_staged_message_is_noop(self):
+        # Staged audio with NO row yet: the row may still arrive (this is
+        # what a 404 delete means to the caller), so the staging entry must
+        # survive — a later persist_message() is still entitled to attach it.
+        staged = persistence.persist_audio("room1", "id-1", B64_AUDIO, "audio/webm")
+
+        result = persistence.delete_message("room1", "id-1")
+
+        assert result is False
+        assert persistence._pending_audio[("room1", "id-1")] == [staged]
+        assert (persistence_root_path() / "room1" / staged).exists()
+        persistence.persist_message("room1", ChatMessage(role="user", content="hi"), "id-1")
+        assert persistence.load_history("room1")[0]["audio"] == [staged]
+
+    def test_sweep_removes_prefix_orphan_not_in_audio_array(self):
+        persistence.persist_message("room1", ChatMessage(role="user", content="hi"), "id-1")
+        # A stray file with this message's prefix that no row references
+        # (e.g. a staging file from an upload that raced the delete):
+        stray = "id-1_pending_deadbeef.webm"
+        (persistence_root_path() / "room1" / stray).write_bytes(b"orphan")
+        # A different message's file must NOT be touched by the sweep:
+        persistence.persist_message(
+            "room1", ChatMessage(role="assistant", content="x", persona="Luna"), "id-2"
+        )
+
+        result = persistence.delete_message("room1", "id-1")
+
+        room_dir = persistence_root_path() / "room1"
+        assert result is True
+        assert not (room_dir / stray).exists()
+        assert [m["id"] for m in persistence.load_history("room1")] == ["id-2"]
+
+    def test_missing_audio_file_does_not_raise(self):
+        persistence.persist_message("room1", ChatMessage(role="user", content="hi"), "id-1")
+        persistence.persist_audio("room1", "id-1", B64_AUDIO, "audio/webm")
+        # Simulate a file the user deleted by hand:
+        (persistence_root_path() / "room1" / "id-1_0.webm").unlink()
+
+        # missing_ok semantics — no exception, delete still succeeds:
+        assert persistence.delete_message("room1", "id-1") is True
+        assert persistence.load_history("room1") == []
+
+    def test_unsafe_audio_entries_are_skipped_without_touching_files_outside_room(self):
+        # history.json is hand-editable, so its "audio" arrays are data, not
+        # trusted paths. A traversal entry must not let delete_message()
+        # unlink files outside the room directory (or raise on a directory
+        # unlink) — it must skip the unsafe entries, still delete the row,
+        # and still remove the SAFE entry in the same array.
+        room_dir = persistence_root_path() / "room1"
+        room_dir.mkdir(parents=True)
+        # A file OUTSIDE the room directory that a traversal entry would
+        # target if the guard were absent:
+        sentinel = room_dir.parent / "outside.txt"
+        sentinel.write_bytes(b"must survive")
+        # A safe, real audio file that must still be deleted:
+        safe_file = room_dir / "id-1_0.webm"
+        safe_file.write_bytes(b"safe audio")
+
+        (room_dir / "history.json").write_text(json.dumps({
+            "datetime": None,
+            "messages": [
+                {
+                    "id": "id-1",
+                    "sender": "USER",
+                    "text": "hi",
+                    "audio": [
+                        "id-1_0.webm",      # safe — must be unlinked
+                        "../outside.txt",   # traversal — must be skipped
+                        "..\\outside.txt",  # other separator flavour
+                        "..",               # the parent directory itself
+                        42,                 # not even a string
+                    ],
+                },
+                {"id": "id-2", "sender": "USER", "text": "sibling", "audio": []},
+            ],
+        }))
+
+        assert persistence.delete_message("room1", "id-1") is True
+
+        assert sentinel.read_bytes() == b"must survive"
+        assert not safe_file.exists()
+        assert [m["id"] for m in persistence.load_history("room1")] == ["id-2"]
+
+
+class TestDeleteMessageConcurrency:
+    def test_concurrent_delete_and_persist_no_lost_updates_or_corruption(self):
+        """Interleaved persist_message / persist_audio / delete_message calls
+        must not clobber each other: every worker owns a distinct message ID,
+        so the final history is deterministic regardless of scheduling —
+        even-indexed workers delete their own message after persisting it,
+        odd-indexed workers persist + attach audio. The history file must be
+        valid JSON throughout (a half-write would fail to parse)."""
+        workers = 8
+        errors = []
+
+        def worker(index: int):
+            message_id = f"id-{index}"
+            try:
+                persistence.persist_message(
+                    "race",
+                    ChatMessage(role="user", content=f"msg-{index}"),
+                    message_id,
+                )
+                if index % 2 == 0:
+                    persistence.delete_message("race", message_id)
+                else:
+                    persistence.persist_audio("race", message_id, B64_AUDIO, "audio/webm")
+            except Exception as exc:  # pragma: no cover - failure path
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(workers)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        data = json.loads((persistence_root_path() / "race" / "history.json").read_text())
+        remaining = {m["id"]: m for m in data["messages"]}
+        assert set(remaining) == {f"id-{i}" for i in range(1, workers, 2)}
+        for msg in remaining.values():
+            assert len(msg["audio"]) == 1
+
+
+# ---------------------------------------------------------------------------
 # clear_room
 # ---------------------------------------------------------------------------
 
@@ -269,6 +456,38 @@ class TestClearRoom:
 
     def test_clear_room_missing_room_is_a_noop(self):
         persistence.clear_room("never-existed")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# delete_room
+# ---------------------------------------------------------------------------
+
+class TestDeleteRoom:
+    def test_delete_room_removes_the_directory_and_all_its_contents(self):
+        persistence.persist_message("room1", ChatMessage(role="user", content="a"), "id-1")
+        persistence.persist_audio("room1", "id-1", B64_AUDIO, "audio/webm")
+        room_dir = persistence_root_path() / "room1"
+        assert room_dir.exists()
+        assert len(list(room_dir.iterdir())) == 2
+
+        persistence.delete_room("room1")
+
+        assert not room_dir.exists()
+
+    def test_delete_room_drops_staged_audio_from_registry(self):
+        staged = persistence.persist_audio("room1", "m-1", B64_AUDIO, "audio/webm")
+        assert (persistence_root_path() / "room1" / staged).exists()
+
+        persistence.delete_room("room1")
+
+        # Staged file is gone from disk...
+        assert not (persistence_root_path() / "room1" / staged).exists()
+        # ...and a subsequent row for the same ID must not resurrect it.
+        persistence.persist_message("room1", ChatMessage(role="user", content="hi"), "m-1")
+        assert persistence.load_history("room1")[0]["audio"] == []
+
+    def test_delete_room_missing_room_is_a_noop(self):
+        persistence.delete_room("never-existed")  # must not raise
 
 
 def persistence_root_path():

@@ -12,6 +12,7 @@ testsetup.sh
 restore.sh
 .venv/
 startup.sh
+llm_api_key
 
 # Secrets — never commit. See .env.example for the template.
 .env

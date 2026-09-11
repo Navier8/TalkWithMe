@@ -386,8 +386,19 @@ async function createChatRoom() {
     }
 }
 
-function confirmDeleteChatRoom(name) {
-    crConfirmMsg.textContent = `Delete chat room "${name}"? Personas will not be deleted, only unassigned from this room.`;
+async function confirmDeleteChatRoom(name) {
+    // Warn about the persisted conversation only when the room actually
+    // has one. The count comes from a read-only endpoint — loadPersistedHistory
+    // would switch the backend session to the room being deleted. If the
+    // count can't be determined, warn anyway: a missed warning about
+    // deleted data is worse than a redundant one.
+    const count = await getRoomMessageCount(name);
+    let message = `Delete chat room "${name}"? Personas will not be deleted, only unassigned from this room.`;
+    if (count === null || count > 0) {
+        const detail = count !== null ? ` (${count} message${count === 1 ? "" : "s"})` : "";
+        message += ` The room's saved conversation history and audio${detail} will be permanently deleted.`;
+    }
+    crConfirmMsg.textContent = message;
     crConfirmOverlay.classList.remove("hidden");
 
     const deleteBtn = document.getElementById("cr-confirm-delete");
@@ -404,11 +415,17 @@ async function deleteChatRoom(name) {
             console.error("Delete chat room failed:", resp.status);
             return;
         }
-        // If we deleted the currently selected room, switch back to default
-        if (currentChatRoom === name) {
-            currentChatRoom = "default";
-        }
+        // loadChatRooms() below reverts currentChatRoom to "default" on its
+        // own once the room vanishes from the list, but that only updates
+        // the dropdown — the chat panel would keep showing the deleted
+        // room's messages. switchChatRoom() does the full job: clear the
+        // panel, load default's persisted history (which also resets the
+        // backend session), and re-apply the room filter.
+        const deletedActiveRoom = currentChatRoom.toLowerCase() === name.toLowerCase();
         await loadChatRooms();
+        if (deletedActiveRoom) {
+            await switchChatRoom("default");
+        }
         renderChatRoomList();
     } catch (err) {
         console.error("Delete chat room error:", err);

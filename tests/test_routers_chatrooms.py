@@ -4,6 +4,9 @@ The fixture config has one room ("TNG" with Alex+Luna) and two personas.
 The implicit "default" room is not in chatrooms.yaml.
 """
 
+from app import persistence
+from app.models import ChatMessage
+
 
 # ---------------------------------------------------------------------------
 # Listing
@@ -100,6 +103,103 @@ class TestDeleteChatroom:
     def test_delete_unknown_room_404(self, client):
         resp = client.delete("/api/chatrooms/NoSuchRoom")
         assert resp.status_code == 404
+
+    def test_delete_removes_persistence_directory_and_its_contents(
+        self, client, persistence_root
+    ):
+        # GIVEN a room with a persisted message and an audio file on disk:
+        client.post("/api/chatrooms", json={"name": "Enterprise"})
+        persistence.persist_message(
+            "Enterprise", ChatMessage(role="user", content="hi"), "id-1"
+        )
+        (persistence_root / "Enterprise" / "id-1_0.webm").write_bytes(b"fake-audio")
+        room_dir = persistence_root / "Enterprise"
+        assert room_dir.exists()
+
+        # WHEN the room is deleted:
+        resp = client.delete("/api/chatrooms/Enterprise")
+
+        # THEN the persistence directory is gone, not just the YAML entry:
+        assert resp.status_code == 204
+        assert not room_dir.exists()
+
+    def test_delete_room_without_persistence_directory_succeeds(
+        self, client, persistence_root
+    ):
+        # A room that never had a message has no directory; delete must not 500.
+        client.post("/api/chatrooms", json={"name": "Enterprise"})
+        assert not (persistence_root / "Enterprise").exists()
+        assert client.delete("/api/chatrooms/Enterprise").status_code == 204
+
+    def test_delete_then_recreate_starts_with_empty_history(self, client):
+        # The user-visible regression: re-creating a deleted room must not
+        # resurrect the old room's conversation.
+        client.post("/api/chatrooms", json={"name": "Enterprise"})
+        persistence.persist_message(
+            "Enterprise", ChatMessage(role="user", content="secret"), "id-1"
+        )
+        assert client.delete("/api/chatrooms/Enterprise").status_code == 204
+
+        client.post("/api/chatrooms", json={"name": "Enterprise"})
+        history = client.get("/api/session/load-room/Enterprise").json()
+
+        assert history["messages"] == []
+
+    def test_delete_active_room_resets_session_to_default(
+        self, client, persistence_root
+    ):
+        # GIVEN a session sitting in "TNG" with some history — and a
+        # persisted conversation in the implicit "default" room as well,
+        # so the assertion below can prove the reset LOADED default's
+        # history rather than merely clearing the session:
+        persistence.persist_message("TNG", ChatMessage(role="user", content="hi"), "id-1")
+        persistence.persist_message(
+            "default", ChatMessage(role="user", content="default-chat"), "id-d"
+        )
+        client.get("/api/session/load-room/TNG")
+        assert client.get("/api/session").json()["current_room"] == "TNG"
+
+        # WHEN the active room is deleted:
+        resp = client.delete("/api/chatrooms/TNG")
+
+        # THEN the session is back in "default" carrying default's persisted
+        # history (a bare reset to an empty session would leave the user
+        # staring at a blank room even though the conversation is on disk),
+        # and the deleted room's persistence is gone:
+        assert resp.status_code == 204
+        state = client.get("/api/session").json()
+        assert state["current_room"] == "default"
+        assert [m["content"] for m in state["history"]] == ["default-chat"]
+        assert not (persistence_root / "TNG").exists()
+
+    def test_delete_active_room_match_is_case_insensitive(
+        self, client, persistence_root
+    ):
+        persistence.persist_message("TNG", ChatMessage(role="user", content="hi"), "id-1")
+        client.get("/api/session/load-room/TNG")
+
+        resp = client.delete("/api/chatrooms/tng")
+
+        assert resp.status_code == 204
+        assert client.get("/api/session").json()["current_room"] == "default"
+        assert not (persistence_root / "TNG").exists()
+
+    def test_delete_inactive_room_keeps_the_active_session(self, client):
+        # GIVEN a session sitting in another room:
+        client.post("/api/chatrooms", json={"name": "Enterprise"})
+        persistence.persist_message(
+            "Enterprise", ChatMessage(role="user", content="hi"), "id-1"
+        )
+        client.get("/api/session/load-room/Enterprise")
+
+        # WHEN a non-active room is deleted:
+        resp = client.delete("/api/chatrooms/TNG")
+
+        # THEN the session is untouched (still in the other room, same history):
+        assert resp.status_code == 204
+        state = client.get("/api/session").json()
+        assert state["current_room"] == "Enterprise"
+        assert [m["content"] for m in state["history"]] == ["hi"]
 
 
 # ---------------------------------------------------------------------------

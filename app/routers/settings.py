@@ -1,8 +1,9 @@
 """Settings router — read and update application settings from settings.yaml."""
 
 import logging
+from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from app import config as app_config
 from app.config import AppSettings, LLMSettings, STTConfig, TTSConfig
@@ -14,6 +15,7 @@ from app.models import (
     STTSettingsResponse,
     TTSSettingsResponse,
 )
+from app.services import llm, tts_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -31,11 +33,9 @@ def _to_response(cfg: AppSettings) -> SettingsResponse:
         tts=TTSSettingsResponse(
             enabled=cfg.tts.enabled,
             base_url=cfg.tts.base_url,
-            num_steps=cfg.tts.num_steps,
-            guidance_scale=cfg.tts.guidance_scale,
-            seed=cfg.tts.seed,
             timeout=cfg.tts.timeout,
             streaming=cfg.tts.streaming,
+            parameters=cfg.tts.parameters,
         ),
         stt=STTSettingsResponse(
             enabled=cfg.stt.enabled,
@@ -48,6 +48,7 @@ def _to_response(cfg: AppSettings) -> SettingsResponse:
             max_turns_for_context=cfg.general.max_turns_for_context,
             show_tool_calls=cfg.general.show_tool_calls,
             enable_persona_memories=cfg.general.enable_persona_memories,
+            global_system_prompt=cfg.general.global_system_prompt,
             debug_latency=cfg.general.debug_latency,
         ),
     )
@@ -59,22 +60,51 @@ def get_settings():
     return _to_response(app_config.get_settings())
 
 
+def _validate_tts_parameters_if_documented(base_url: Optional[str], parameters: dict) -> None:
+    """T7: 422 on garbage tts.parameters — but only when we can actually
+    judge them.
+
+    Validation runs only when the cached capabilities document belongs to
+    the exact base_url being saved. If the user is switching engines in the
+    same save, the cached doc describes the OLD server and is useless for
+    judging the new parameters — validation is skipped (T4 makes the switch
+    safe by construction: unadvertised fields are never sent). A negative
+    or empty cache (server down, no /capabilities) is skipped the same
+    way: the save path stays synchronous and offline-safe, and the server's
+    own 422 on the first synthesis is the backstop.
+    """
+    if not parameters or not base_url:
+        return
+    cached_url, doc = tts_client.cached_capabilities()
+    if doc is None or cached_url != base_url:
+        return
+    error = tts_client.validate_tts_parameters(doc, parameters)
+    if error:
+        logger.warning("Settings save rejected: invalid tts.parameters: %s", error)
+        raise HTTPException(status_code=422, detail=error)
+
+
 @router.put("", response_model=SettingsResponse)
 def update_settings(req: SettingsUpdateRequest):
     """Update application settings and persist to settings.yaml.
 
-    The frontend sends seed=0 to mean "no seed" (null). We normalize that
-    here so the YAML and in-memory cache stay consistent.
+    The tts: section is a full replacement; its generic `parameters` map is
+    validated against the cached capabilities doc when one is available for
+    the saved base_url (see _validate_tts_parameters_if_documented).
     """
-    # Normalize: blank base_url strings -> None, seed 0 -> None
-    tts_base = req.tts.base_url if req.tts.base_url.strip() else None
-    stt_base = req.stt.base_url if req.stt.base_url.strip() else None
-    tts_seed = None if req.tts.seed == 0 else req.tts.seed
+    # Normalize exactly the way the config models will (strip whitespace +
+    # trailing slashes, blank -> None). The capabilities cache is keyed on
+    # the NORMALIZED URL, so the T7 comparison below must see the same form:
+    # a same-server save spelled with a trailing slash must still be judged,
+    # not silently skipped.
+    tts_base = app_config.clean_base_url(req.tts.base_url)
+    stt_base = app_config.clean_base_url(req.stt.base_url)
 
-    # The mcp section is yaml-only and llm.api_key is env-only (see
-    # TALKWITHME_LLM_API_KEY in app/config.py) — both deliberately absent
-    # from the request model — so they must be carried over from the
-    # current config, otherwise every UI save would silently wipe them.
+    _validate_tts_parameters_if_documented(tts_base, req.tts.parameters)
+
+    # The mcp section is yaml-only for now (deliberately not in the request
+    # model). Carry it over from the current config, otherwise every UI save
+    # would silently wipe it from settings.yaml.
     current = app_config.get_settings()
 
     # The general section is a partial update: fields the client omitted
@@ -91,7 +121,6 @@ def update_settings(req: SettingsUpdateRequest):
     updated = AppSettings(
         llm=LLMSettings(
             base_url=req.llm.base_url,
-            api_key=current.llm.api_key,
             model=req.llm.model,
             max_tokens=req.llm.max_tokens,
             temperature=req.llm.temperature,
@@ -99,11 +128,9 @@ def update_settings(req: SettingsUpdateRequest):
         tts=TTSConfig(
             enabled=req.tts.enabled,
             base_url=tts_base,
-            num_steps=req.tts.num_steps,
-            guidance_scale=req.tts.guidance_scale,
-            seed=tts_seed,
             timeout=req.tts.timeout,
             streaming=req.tts.streaming,
+            parameters=req.tts.parameters,
         ),
         stt=STTConfig(
             enabled=req.stt.enabled,
@@ -115,8 +142,15 @@ def update_settings(req: SettingsUpdateRequest):
     )
 
     app_config.save_settings(updated)
-    logger.info("Settings updated: llm=%s, tts_active=%s, stt_active=%s, debug_latency=%s",
-                updated.llm.base_url, updated.tts.is_active, updated.stt.is_active,
-                updated.general.debug_latency)
+    # A save may have (re)introduced an http:// LLM URL: re-run the
+    # cleartext warning (deduped per URL, so an unchanged URL stays quiet).
+    llm.warn_if_plaintext_llm(updated.llm.base_url)
+    # Drop the capabilities cache (slot only, no inline refetch): the save
+    # may have changed the TTS base_url, and a negative cache from a server
+    # that was down at startup must not outlive the save that fixed it.
+    # The next get_capabilities() call refetches.
+    tts_client.invalidate_capabilities()
+    logger.info("Settings updated: llm=%s, tts_active=%s, stt_active=%s",
+                updated.llm.base_url, updated.tts.is_active, updated.stt.is_active)
 
     return _to_response(updated)

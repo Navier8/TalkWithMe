@@ -20,7 +20,10 @@ if str(PROJECT_ROOT) not in sys.path:
 import app.config as app_config
 import app.persistence as persistence
 import app.routers.persistence as persistence_router
+import app.services.llm as llm_module
+import app.services.llm_auth as llm_auth
 import app.services.tool_registry as tool_registry
+import app.services.tts_client as tts_client
 from app.session import session as global_session
 
 from tests.factories import make_chatrooms, make_personas, make_settings
@@ -49,6 +52,18 @@ def isolated_app_state(tmp_path, monkeypatch):
     # Module-level registries that survive across tests.
     persistence._pending_audio.clear()
     tool_registry.reset()
+    # The TTS capabilities cache (single slot, docs and failures alike):
+    # a doc cached by one test must not leak into the next.
+    tts_client.invalidate_capabilities()
+    # The LLM API key: never read the real llm_api_key file or the
+    # developer's TALKWITHME_LLM_API_KEY, and never let a key cached by an
+    # earlier test leak into the next one.
+    monkeypatch.setattr(llm_auth, "_PROJECT_ROOT", tmp_path)
+    monkeypatch.delenv(llm_auth.ENV_VAR_NAME, raising=False)
+    llm_auth.invalidate_llm_api_key()
+    # The once-per-URL cleartext warning dedupe in llm.py must not survive
+    # a test boundary.
+    llm_module._warned_plaintext_urls.clear()
 
     # The global session singleton: start every test clean.
     global_session._history.clear()
@@ -59,6 +74,9 @@ def isolated_app_state(tmp_path, monkeypatch):
 
     persistence._pending_audio.clear()
     tool_registry.reset()
+    tts_client.invalidate_capabilities()
+    llm_auth.invalidate_llm_api_key()
+    llm_module._warned_plaintext_urls.clear()
     global_session._history.clear()
     global_session._active_personas.clear()
     global_session.set_current_room("default")
@@ -89,3 +107,51 @@ def client():
     from app.main import app
 
     return TestClient(app)
+
+
+@pytest.fixture
+def raw_asgi_get():
+    """Run a GET against the app with an ASGI scope built the way uvicorn does.
+
+    httpx (the TestClient's transport) normalizes dot segments and
+    re-encodes the URL client-side, so a traversal URL can never reach the
+    handler through a normal request. uvicorn instead sets scope["path"]
+    to the percent-decoded target and scope["raw_path"] to the raw bytes —
+    that combination is what makes "..%2Fx" a traversal at all. This
+    helper reproduces uvicorn's scope construction (h11_impl.py) exactly.
+    """
+    import asyncio
+
+    from app.main import app
+
+    def _raw_asgi_get(path: str, raw_path: bytes | None = None):
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": path,
+            "raw_path": (raw_path if raw_path is not None else path.encode("ascii")),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"host", b"testserver")],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        }
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        result = {"status": None, "body": b""}
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                result["status"] = message["status"]
+            elif message["type"] == "http.response.body":
+                result["body"] += message.get("body", b"")
+
+        asyncio.run(app(scope, receive, send))
+        return result["status"], result["body"]
+
+    return _raw_asgi_get

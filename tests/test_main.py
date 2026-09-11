@@ -1,6 +1,7 @@
 """Tests for app/main.py — the index route, the startup lifespan, and the
 TALKWITHME_LOG_LEVEL environment override."""
 
+import asyncio
 import logging
 
 import pytest
@@ -8,8 +9,31 @@ from fastapi.testclient import TestClient
 
 import app.config as app_config
 import app.main as main_module
+import app.services.llm_auth as llm_auth
+import app.services.tts_client as tts_client
+from app.config import TTSConfig
 from app.session import session
-from tests.factories import make_chatrooms, make_personas, make_settings
+from tests.factories import (
+    FakeAsyncClient,
+    json_response,
+    make_capabilities_doc,
+    make_chatrooms,
+    make_personas,
+    make_settings,
+)
+
+
+def _run(coro):
+    """Run an awaitable to completion on a throwaway event loop."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+async def fake_load_tools():
+    pass
 
 
 class TestResolveRootLogLevel:
@@ -71,12 +95,111 @@ class TestResolveRootLogLevel:
         assert "LOUD" in caplog.text
 
 
+def stub_lifespan(monkeypatch, settings=None):
+    """Stub the lifespan's config loads and network discovery.
+
+    Returns the settings the lifespan will see (default factory settings:
+    http:// LLM URL, TTS/STT inactive).
+    """
+    settings = settings or make_settings()
+    monkeypatch.setattr(main_module.app_config, "load_personas", lambda: make_personas())
+    monkeypatch.setattr(main_module.app_config, "load_settings", lambda: settings)
+    monkeypatch.setattr(main_module.app_config, "load_chatrooms", lambda: make_chatrooms())
+    monkeypatch.setattr(main_module, "ensure_capabilities", fake_ensure_capabilities)
+    monkeypatch.setattr(main_module, "load_tools", fake_load_tools)
+    return settings
+
+
+async def fake_ensure_capabilities():
+    pass
+
+
+class TestLifespanLlmApiKey:
+    """API key resolution and the cleartext warning at startup
+    (docs/feature_api_key.md)."""
+
+    def test_startup_envKey_logsSourceAndStatus_neverTheKey(self, monkeypatch, caplog):
+        sentinel = "sk-startup-sentinel"
+        # GIVEN an API key in the environment:
+        monkeypatch.setenv(llm_auth.ENV_VAR_NAME, sentinel)
+        llm_auth.invalidate_llm_api_key()
+        stub_lifespan(monkeypatch)
+
+        # WHEN the lifespan runs,
+        with caplog.at_level(logging.INFO):
+            with TestClient(main_module.app):
+                pass
+
+        # THEN the log names the source and the key status...
+        assert "LLM API key loaded from environment variable TALKWITHME_LLM_API_KEY" in caplog.text
+        assert "LLM endpoint: http://llm.local:8080 (API key: configured)" in caplog.text
+        # ...but the key value itself never reaches the log:
+        assert sentinel not in caplog.text
+
+    def test_startup_fileKey_logsSourceAndStatus(self, monkeypatch, tmp_path, caplog):
+        # GIVEN a key file in the (tmp) project root:
+        (tmp_path / llm_auth.KEY_FILENAME).write_text("llm_api_key = sk-file\n", encoding="utf-8")
+        llm_auth.invalidate_llm_api_key()
+        stub_lifespan(monkeypatch)
+
+        # WHEN the lifespan runs,
+        with caplog.at_level(logging.INFO):
+            with TestClient(main_module.app):
+                pass
+
+        # THEN the file source and the key status are logged:
+        assert "LLM API key loaded from llm_api_key" in caplog.text
+        assert "LLM endpoint: http://llm.local:8080 (API key: configured)" in caplog.text
+
+    def test_startup_noKey_logsNotConfigured(self, monkeypatch, caplog):
+        # GIVEN no key source (the fixture defaults),
+        llm_auth.invalidate_llm_api_key()
+        stub_lifespan(monkeypatch)
+
+        # WHEN the lifespan runs,
+        with caplog.at_level(logging.INFO):
+            with TestClient(main_module.app):
+                pass
+
+        # THEN the log reports that no key is configured:
+        assert "LLM endpoint: http://llm.local:8080 (API key: not configured)" in caplog.text
+
+    def test_startup_httpUrl_logsCleartextWarning(self, monkeypatch, caplog):
+        # GIVEN the stock http:// LLM URL,
+        stub_lifespan(monkeypatch)
+
+        # WHEN the lifespan runs,
+        with caplog.at_level(logging.WARNING):
+            with TestClient(main_module.app):
+                pass
+
+        # THEN the cleartext warning is logged exactly once:
+        warnings = [r for r in caplog.records if "cleartext" in r.getMessage()]
+        assert len(warnings) == 1
+        assert warnings[0].getMessage() == (
+            "Warning: your LLM connection uses http; your chats are sent in cleartext.")
+
+    def test_startup_httpsUrl_logsNoCleartextWarning(self, monkeypatch, caplog):
+        # GIVEN an https LLM URL,
+        settings = make_settings()
+        settings.llm.base_url = "https://llm.local:8080"
+        stub_lifespan(monkeypatch, settings=settings)
+
+        # WHEN the lifespan runs,
+        with caplog.at_level(logging.WARNING):
+            with TestClient(main_module.app):
+                pass
+
+        # THEN no cleartext warning is logged:
+        assert "cleartext" not in caplog.text
+
+
 class TestIndex:
     def test_serves_chat_ui(self, client):
         resp = client.get("/")
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
-        assert "TalkWithMe v6.0" in resp.text
+        assert "TalkWithMe v7.0" in resp.text
 
     def test_static_files_mounted(self, client):
         # state.js is the shared-globals module every other frontend file depends on.
@@ -88,9 +211,12 @@ class TestIndex:
 class TestLifespan:
     def test_startup_loads_config_and_seeds_session(self, monkeypatch):
         """Running the lifespan (via TestClient's context manager) must load
-        all three config files, seed the session with every persona, and
-        discover MCP tools."""
+        all three config files, warm the TTS capabilities cache, seed the
+        session with every persona, and discover MCP tools."""
         calls = []
+
+        async def fake_ensure_capabilities():
+            calls.append("ensure_capabilities")
 
         async def fake_load_tools():
             calls.append("load_tools")
@@ -101,11 +227,76 @@ class TestLifespan:
                             lambda: (calls.append("load_settings"), make_settings())[1])
         monkeypatch.setattr(main_module.app_config, "load_chatrooms",
                             lambda: (calls.append("load_chatrooms"), make_chatrooms())[1])
+        monkeypatch.setattr(main_module, "ensure_capabilities", fake_ensure_capabilities)
         monkeypatch.setattr(main_module, "load_tools", fake_load_tools)
 
         with TestClient(main_module.app):
             pass
 
-        assert calls == ["load_personas", "load_settings", "load_chatrooms", "load_tools"]
+        assert calls == ["load_personas", "load_settings", "load_chatrooms",
+                         "ensure_capabilities", "load_tools"]
         # Session seeded with every configured persona.
         assert set(session.active_personas) == {"Alex", "Luna"}
+
+    def test_startup_warms_tts_capabilities_cache(self, monkeypatch):
+        """With TTS active, the real ensure_capabilities() fetches
+        /capabilities once during the lifespan and the cache is warm
+        afterwards (no further network access)."""
+        tts = TTSConfig(enabled=True, base_url="http://tts.local:5500")
+        doc = make_capabilities_doc(engine="omnivoice")
+        calls = []
+
+        monkeypatch.setattr(main_module.app_config, "load_personas", lambda: make_personas())
+        monkeypatch.setattr(main_module.app_config, "load_settings", lambda: make_settings(tts=tts))
+        monkeypatch.setattr(main_module.app_config, "load_chatrooms", lambda: make_chatrooms())
+        monkeypatch.setattr(main_module, "load_tools", fake_load_tools)
+        # The settings cache must agree with what load_settings "loaded".
+        monkeypatch.setattr(app_config, "_settings_cache", make_settings(tts=tts))
+
+        def responder(method, url, **kw):
+            calls.append((method, url))
+            return json_response(200, doc)
+
+        monkeypatch.setattr(tts_client.httpx, "AsyncClient",
+                            lambda *a, **kw: FakeAsyncClient(responder))
+
+        with TestClient(main_module.app):
+            pass
+
+        assert calls == [("GET", "http://tts.local:5500/capabilities")]
+        # The warm cache serves without another request:
+        def dead(*a, **kw):
+            raise AssertionError("the capabilities cache should have been warm")
+
+        monkeypatch.setattr(tts_client.httpx, "AsyncClient",
+                            lambda *a, **kw: FakeAsyncClient(dead))
+        assert _run(tts_client.get_capabilities()) == doc
+
+    def test_startup_survives_tts_capabilities_fetch_failure(self, monkeypatch):
+        """TTS active but /capabilities 404s (e.g. an old pre-ported script,
+        unsupported per plan T11): startup completes, the cache holds a
+        negative result, and no retry happens."""
+        tts = TTSConfig(enabled=True, base_url="http://tts.local:5500")
+        calls = []
+
+        monkeypatch.setattr(main_module.app_config, "load_personas", lambda: make_personas())
+        monkeypatch.setattr(main_module.app_config, "load_settings", lambda: make_settings(tts=tts))
+        monkeypatch.setattr(main_module.app_config, "load_chatrooms", lambda: make_chatrooms())
+        monkeypatch.setattr(main_module, "load_tools", fake_load_tools)
+        monkeypatch.setattr(app_config, "_settings_cache", make_settings(tts=tts))
+
+        def responder(method, url, **kw):
+            calls.append(url)
+            return json_response(404, {"detail": "Not Found"})
+
+        monkeypatch.setattr(tts_client.httpx, "AsyncClient",
+                            lambda *a, **kw: FakeAsyncClient(responder))
+
+        with TestClient(main_module.app):
+            pass
+
+        assert calls == ["http://tts.local:5500/capabilities"]
+        assert _run(tts_client.get_capabilities()) is None
+        assert calls == ["http://tts.local:5500/capabilities"]  # negative cache served, no retry
+
+

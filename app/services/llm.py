@@ -1,8 +1,11 @@
-"""Streaming client for a locally running llama.cpp server.
+"""Streaming client for an OpenAI-compatible LLM (local or remote).
 
-The llama.cpp server exposes an OpenAI-compatible API at /v1/chat/completions.
-We stream tokens via SSE for the main chat flow, and do a quick non-streaming
-call for the persona router.
+Typically a locally running llama.cpp server; a remote server is also fine.
+The LLM exposes an OpenAI-compatible API at /v1/chat/completions. We stream
+tokens via SSE for the main chat flow, and do a quick non-streaming call
+for the persona router. When an API key is configured (app/services/
+llm_auth.py, docs/feature_api_key.md), every request carries it as an
+Authorization: Bearer header.
 
 Tool calling: stream_chat_with_tools() runs a fully agentic loop — when the
 LLM answers with tool_calls, we invoke each tool (built-in tools from
@@ -19,16 +22,48 @@ from typing import AsyncGenerator, Dict, List, Optional
 import httpx
 
 from app.config import Persona, get_settings
-from app.services import builtin, mcp_client
+from app.services import builtin, llm_auth, mcp_client
 from app.services.tool_registry import get_server_for_tool
 
 logger = logging.getLogger(__name__)
 
 
-def _llm_headers() -> Dict[str, str]:
-    """Return auth headers for providers that require an API key."""
-    api_key = get_settings().llm.api_key.strip()
-    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+def _llm_client(timeout: float) -> httpx.AsyncClient:
+    """A fresh AsyncClient for one LLM call.
+
+    Carries the API key (docs/feature_api_key.md) as an Authorization
+    header when one is configured. The key is resolved once per process
+    by llm_auth, so the header is either present on every request this
+    process makes or on none — there is no mid-process drift.
+    """
+    key = llm_auth.get_llm_api_key()
+    headers = {"Authorization": f"Bearer {key}"} if key else None
+    return httpx.AsyncClient(timeout=timeout, headers=headers)
+
+
+# Distinct base_urls that already produced the cleartext warning: the user
+# is warned once per URL per process, not once per chat turn.
+_warned_plaintext_urls: set = set()
+
+
+def warn_if_plaintext_llm(base_url: Optional[str]) -> None:
+    """Log a warning (once per distinct URL) when the LLM endpoint is http.
+
+    A remote LLM over plain http sends every chat message — and the API
+    key, when one is configured — in cleartext. The app does not refuse
+    to connect; the user may well be on a trusted local network. It just
+    makes sure the risk is visible in the log, at startup and after any
+    settings save that (re)introduces an http URL.
+    """
+    if not base_url:
+        return
+    url = base_url.strip().lower()
+    if not url.startswith("http://"):
+        return
+    if url in _warned_plaintext_urls:
+        return
+    _warned_plaintext_urls.add(url)
+    logger.warning("Warning: your LLM connection uses http; your chats are sent in cleartext.")
 
 
 def _base_payload(messages: List[dict]) -> dict:
@@ -52,7 +87,7 @@ async def _iter_completion_chunks(payload: dict) -> AsyncGenerator[dict, None]:
     settings = get_settings()
     url = f"{settings.llm.base_url}/v1/chat/completions"
 
-    async with httpx.AsyncClient(timeout=120.0, headers=_llm_headers()) as client:
+    async with _llm_client(timeout=120.0) as client:
         async with client.stream("POST", url, json=payload) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
@@ -100,7 +135,7 @@ async def chat_completion(messages: List[Dict[str, str]], max_tokens: int = 64) 
     }
 
     try:
-        async with httpx.AsyncClient(timeout=15.0, headers=_llm_headers()) as client:
+        async with _llm_client(timeout=15.0) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             body = resp.json()

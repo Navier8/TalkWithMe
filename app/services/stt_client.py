@@ -22,6 +22,8 @@ def _mime_to_extension(mime_type: str) -> str:
     base = (mime_type or "").split(";", 1)[0].strip()
     if "/" not in base:
         return "bin"
+    if base == "audio/webm":
+        return "webm"
     ext = mimetypes.guess_extension(base)
     if ext and ext.startswith("."):
         return ext[1:]  # strip leading dot
