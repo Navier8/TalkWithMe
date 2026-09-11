@@ -50,6 +50,9 @@ def _to_response(cfg: AppSettings) -> SettingsResponse:
             enable_persona_memories=cfg.general.enable_persona_memories,
             global_system_prompt=cfg.general.global_system_prompt,
             debug_latency=cfg.general.debug_latency,
+            voice_activation=cfg.general.voice_activation,
+            vad_sensitivity=cfg.general.vad_sensitivity,
+            vad_silence_ms=cfg.general.vad_silence_ms,
         ),
     )
 

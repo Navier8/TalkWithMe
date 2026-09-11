@@ -26,6 +26,24 @@ async function init() {
     // Load persisted history for the current room
     const history = await loadPersistedHistory(currentChatRoom);
     renderPersistedHistory(history.messages, currentChatRoom);
+
+    await autoStartHandsFree();
+}
+
+/**
+ * Honour general.voice_activation on load.
+ *
+ * Best-effort by design: without a prior permission grant getUserMedia
+ * prompts, and an AudioContext built outside a user gesture can come up
+ * suspended. Either way the setting stays on and the button is right
+ * there — one click (which IS a gesture) starts listening. Failing
+ * loudly here would mean an error bubble on every page load.
+ */
+async function autoStartHandsFree() {
+    if (!voiceActivationEnabled || !sttAvailable) return;
+    if (!await enableHandsFree()) {
+        console.info("Voice activation is enabled but could not start automatically; use the hands-free button.");
+    }
 }
 
 /**
@@ -42,6 +60,9 @@ async function loadGeneralSettings() {
             maxPersonaReplies = data.general.max_persona_replies ?? 1;
             maxTurnsForContext = data.general.max_turns_for_context ?? 6;
             debugLatencyEnabled = data.general.debug_latency ?? false;
+            voiceActivationEnabled = data.general.voice_activation ?? false;
+            vadSensitivity = data.general.vad_sensitivity ?? 3;
+            vadSilenceMs = data.general.vad_silence_ms ?? 900;
         }
     } catch (err) {
         console.warn("Failed to load general settings, using defaults:", err);
@@ -97,12 +118,15 @@ async function checkSTTHealth() {
         const resp = await fetch("/api/stt/health");
         const data = await resp.json();
         sttAvailable = data.available;
-        updateMicButtonUI();
     } catch (err) {
         console.warn("STT health check failed:", err);
         sttAvailable = false;
-        updateMicButtonUI();
     }
+    // Listening with nowhere to send the audio is just an open microphone:
+    // an STT server that went away (or was switched off in Settings) also
+    // switches hands-free off.
+    if (!sttAvailable && handsFreeEnabled) disableHandsFree();
+    updateMicButtonUI();
 }
 
 /* ==========================================================================
@@ -128,6 +152,7 @@ function setupEventListeners() {
     newChatBtn.addEventListener("click", newChat);
     ttsToggleBtn.addEventListener("click", toggleTTS);
     micBtn.addEventListener("click", toggleMicrophone);
+    voiceBtn.addEventListener("click", toggleHandsFree);
     themeSelectEl.addEventListener("change", () => {
         applyTheme(themeSelectEl.value, true);
     });
@@ -135,7 +160,14 @@ function setupEventListeners() {
     document.addEventListener("keydown", (e) => {
         if (e.ctrlKey && e.code === "Space" && !micBtn.disabled) {
             e.preventDefault();
-            toggleMicrophone();
+            // Shift joins the modifier to toggle hands-free instead of
+            // recording one message: same key for "talk", one modifier
+            // apart for "keep listening".
+            if (e.shiftKey) {
+                toggleHandsFree();
+            } else {
+                toggleMicrophone();
+            }
         }
     });
 }

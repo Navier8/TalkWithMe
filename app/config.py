@@ -32,8 +32,52 @@ rejected, never truncated — the LLM can reformulate a shorter one."""
 
 
 # ---------------------------------------------------------------------------
+# Voice activation limits (docs/feature_voice_activation.md)
+# ---------------------------------------------------------------------------
+
+VAD_SENSITIVITY_MIN = 1
+VAD_SENSITIVITY_MAX = 5
+"""Detector sensitivity scale. 1 = only clearly-louder-than-the-room speech
+opens the mic; 5 = a murmur does. The scale is unitless on purpose: the
+thresholds it selects are multiples of the *measured* noise floor, so the
+same number behaves comparably in a quiet study and a noisy kitchen."""
+
+VAD_SILENCE_MS_MIN = 300
+VAD_SILENCE_MS_MAX = 3000
+"""Bounds for the end-of-utterance silence. Below 300 ms a normal
+mid-sentence pause ends the turn; above 3 s the reply feels broken."""
+
+
+# ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
+
+def _clamp_int(value: Any, low: int, high: int, field: str) -> Optional[int]:
+    """Coerce a hand-edited YAML integer into range, or None if unusable.
+
+    settings.yaml is a file people edit by hand, and the voice-activation
+    numbers are the kind you tweak by feel ("try 8 sensitivity"). Pydantic's
+    ge/le would turn such a tweak into a startup crash with no UI left to
+    fix it from, so out-of-range values are clamped (and non-numbers
+    dropped) with a warning, in the spirit of the other degradations here.
+    Booleans are rejected outright: `True` is an int in Python, but
+    `vad_sensitivity: yes` is a typo, not a 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        logger.warning(
+            "settings.yaml: invalid general.%s %r; expected an integer "
+            "between %d and %d, using the default",
+            field, value, low, high,
+        )
+        return None
+    clamped = max(low, min(high, value))
+    if clamped != value:
+        logger.warning(
+            "settings.yaml: general.%s %d is outside %d-%d; using %d",
+            field, value, low, high, clamped,
+        )
+    return clamped
+
 
 def clean_base_url(raw: Optional[str]) -> Optional[str]:
     """Normalize a user-supplied base URL (config models AND save-time
@@ -180,6 +224,20 @@ class GeneralConfig(BaseModel):
     # render it"). Empty/whitespace-only = feature off, nothing appended.
     global_system_prompt: str = ""
     debug_latency: bool = False
+    # Hands-free voice activation (docs/feature_voice_activation.md).
+    # The browser opens the mic on load and lets a client-side voice
+    # activity detector start/stop each recording, instead of the user
+    # clicking the mic button. Default OFF: an always-open microphone is
+    # not something an app should switch on for you.
+    voice_activation: bool = False
+    # How readily the detector calls a frame speech, 1 (least) to 5 (most).
+    # The detector thresholds are multiples of the measured noise floor;
+    # sensitivity picks the multipliers (see VAD_SENSITIVITY in static/vad.js —
+    # the table lives in the frontend because that is where detection runs).
+    vad_sensitivity: int = Field(default=3, ge=1, le=5)
+    # Silence, in milliseconds, that ends an utterance. Too short chops
+    # sentences at the comma; too long makes every turn feel sluggish.
+    vad_silence_ms: int = Field(default=900, ge=300, le=3000)
     # Where persona subdirectories live. Absolute, or relative to the
     # project root; None/empty falls back to <project root>/Personas.
     # yaml-only for now (no UI) — like the mcp: section, changes need a
@@ -218,6 +276,17 @@ class GeneralConfig(BaseModel):
                 data = {**data, "enable_persona_memories": True}
         if "global_system_prompt" in data and data["global_system_prompt"] is None:
             data = {**data, "global_system_prompt": ""}
+        for key, low, high in (
+            ("vad_sensitivity", VAD_SENSITIVITY_MIN, VAD_SENSITIVITY_MAX),
+            ("vad_silence_ms", VAD_SILENCE_MS_MIN, VAD_SILENCE_MS_MAX),
+        ):
+            if key not in data:
+                continue
+            coerced = _clamp_int(data[key], low, high, key)
+            if coerced is None:
+                data = {k: v for k, v in data.items() if k != key}  # use the default
+            elif coerced != data[key]:
+                data = {**data, key: coerced}
         return data
 
 

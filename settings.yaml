@@ -25,6 +25,9 @@ general:
   global_system_prompt: ''
   debug_latency: true
   personas_directory: null
+  voice_activation: false
+  vad_sensitivity: 3
+  vad_silence_ms: 900
 mcp:
   servers: []
   max_tool_iterations: 8
