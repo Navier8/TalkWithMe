@@ -55,6 +55,7 @@ async function loadGenSettingsIntoForm() {
         gsfShowToolCalls.checked = data.general.show_tool_calls ?? true;
         gsfEnablePersonaMemories.checked = data.general.enable_persona_memories ?? true;
         gsfGlobalSystemPrompt.value = data.general.global_system_prompt ?? "";
+        gsfDebugLatency.checked = data.general.debug_latency ?? false;
         return true;
     } catch (err) {
         console.error("Failed to load settings:", err);
@@ -111,6 +112,7 @@ async function submitGenSettings(e) {
             // update, so an omitted field would keep the old value and a
             // cleared textarea could never actually clear the prompt.
             global_system_prompt: gsfGlobalSystemPrompt.value,
+            debug_latency: gsfDebugLatency.checked,
         },
     };
 

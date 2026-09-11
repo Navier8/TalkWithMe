@@ -179,6 +179,7 @@ class GeneralConfig(BaseModel):
     # copy-pasted into every persona prompt (e.g. "no markdown — TTS can't
     # render it"). Empty/whitespace-only = feature off, nothing appended.
     global_system_prompt: str = ""
+    debug_latency: bool = False
     # Where persona subdirectories live. Absolute, or relative to the
     # project root; None/empty falls back to <project root>/Personas.
     # yaml-only for now (no UI) — like the mcp: section, changes need a

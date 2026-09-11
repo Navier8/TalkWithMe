@@ -11,12 +11,14 @@ STT client code lives in its own module: app.services.stt_client
 import base64
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, List, Optional
 
 import httpx
 
 from app.config import get_settings
+from app.services import http_pool
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,10 @@ logger = logging.getLogger(__name__)
 # at; 3 s is enough for a local box and bounds how long a dead endpoint can
 # stall startup or the first synthesis.
 _CAPABILITIES_TIMEOUT_S = 3.0
+
+# /health is the same kind of liveness probe as /capabilities and shares its
+# budget. Named (rather than inline) because it keys a pooled client.
+_HEALTH_TIMEOUT_S = 3.0
 
 # ---------------------------------------------------------------------------
 # Capabilities cache (TTS generification, plan T3)
@@ -97,15 +103,15 @@ async def fetch_capabilities_url(base_url: str) -> Optional[dict]:
     """
     url = f"{base_url}/capabilities"
     try:
-        async with httpx.AsyncClient(timeout=_CAPABILITIES_TIMEOUT_S) as client:
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                logger.warning(
-                    "TTS /capabilities request failed: HTTP %d from %s",
-                    resp.status_code, url,
-                )
-                return None
-            doc = resp.json()
+        client = http_pool.get_client("tts", _CAPABILITIES_TIMEOUT_S)
+        resp = await client.get(url)
+        if resp.status_code != 200:
+            logger.warning(
+                "TTS /capabilities request failed: HTTP %d from %s",
+                resp.status_code, url,
+            )
+            return None
+        doc = resp.json()
     except Exception as exc:
         logger.warning("TTS /capabilities fetch failed for %s: %s", url, exc)
         return None
@@ -378,18 +384,18 @@ async def check_tts_health() -> tuple[bool, Optional[str]]:
     if not settings.tts.is_active:
         return False, None
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(f"{settings.tts.base_url}/health")
-            if resp.status_code not in (200, 404):
-                return False, None
-            # Extract serverType if the response body is valid JSON
-            server_type = None
-            try:
-                body = resp.json()
-                server_type = body.get("serverType")
-            except Exception:
-                pass  # Non-JSON or empty body is fine — just no server type
-            return True, server_type
+        client = http_pool.get_client("tts", _HEALTH_TIMEOUT_S)
+        resp = await client.get(f"{settings.tts.base_url}/health")
+        if resp.status_code not in (200, 404):
+            return False, None
+        # Extract serverType if the response body is valid JSON
+        server_type = None
+        try:
+            body = resp.json()
+            server_type = body.get("serverType")
+        except Exception:
+            pass  # Non-JSON or empty body is fine — just no server type
+        return True, server_type
     except Exception:
         return False, None
 
@@ -524,8 +530,10 @@ def _response_detail(response: httpx.Response) -> str:
 
 
 async def _post_synthesis(url: str, payload: dict, timeout: float) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        return await client.post(url, json=payload)
+    # Pooled client: streaming TTS posts one /synthesize per sentence, and
+    # each of those used to open (and close) its own connection.
+    client = http_pool.get_client("tts", timeout)
+    return await client.post(url, json=payload)
 
 
 async def synthesize(
@@ -565,6 +573,7 @@ async def synthesize(
             settings.tts.parameters,
         )
 
+    started = time.monotonic()
     try:
         doc = await get_capabilities()
         if doc is None:
@@ -606,35 +615,106 @@ async def synthesize(
         if response.status_code != 200:
             logger.warning("TTS synthesis failed: HTTP %d from %s", response.status_code, url)
             return None
-        return response.json()
+        result = response.json()
+        if settings.general.debug_latency:
+            logger.info(
+                "[latency] TTS synthesis: %.0f ms (%d chars)",
+                (time.monotonic() - started) * 1000, len(text),
+            )
+        return result
     except Exception as exc:
         logger.warning("TTS synthesis failed: %s", exc)
         return None
 
 
+# ---------------------------------------------------------------------------
+# Reference-audio cache
+# ---------------------------------------------------------------------------
+#
+# Streaming TTS issues one /synthesize per sentence, and every one of them
+# needs the persona's reference clip as base64. Re-reading the WAV off disk
+# and re-encoding it for each sentence is pure repeated work: the clip is a
+# few hundred KB, it is the same bytes every time, and base64 of it is
+# ~33 % larger again.
+#
+# Keyed on (path, mtime_ns, size) rather than path alone, so re-recording a
+# persona's reference clip is picked up on the next synthesis with no
+# explicit invalidation — the README encourages editing persona directories
+# by hand, and a cache that served a stale voice after such an edit would be
+# a genuinely confusing bug. stat() per call is a few microseconds against
+# the hundreds of milliseconds the encode costs.
+#
+# Unbounded by design: one entry per persona reference file (plus one per
+# edit, which _read_cached prunes by replacing the path's entry), and a
+# room holds a handful of personas.
+
+_reference_cache: dict[str, tuple[tuple[int, int], str]] = {}
+
+
+def invalidate_reference_cache() -> None:
+    """Drop every cached reference audio / transcript (test + settings hook).
+
+    Not needed for on-disk edits — the (mtime, size) key already catches
+    those. It exists so a test cannot leak one tmp_path's files into the
+    next, and so a caller with a reason to force a re-read has one.
+    """
+    _reference_cache.clear()
+
+
+def _read_cached(path_str: str, kind: str, decode) -> Optional[str]:
+    """Return decode(path)'s result, cached on the file's (mtime_ns, size).
+
+    `kind` names the file in the not-found warning. `decode` takes a Path
+    and returns the string to cache. A missing file is NOT cached — the
+    stat() fails, so the next call retries; a persona whose reference clip
+    is restored recovers without a restart.
+    """
+    path = Path(path_str)
+    try:
+        stat = path.stat()
+    except OSError:
+        logger.warning("%s file not found: %s", kind, path_str)
+        _reference_cache.pop(path_str, None)
+        return None
+
+    stamp = (stat.st_mtime_ns, stat.st_size)
+    cached = _reference_cache.get(path_str)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+
+    value = decode(path)
+    _reference_cache[path_str] = (stamp, value)
+    return value
+
+
 def encode_reference_audio(audio_path: Optional[str]) -> Optional[str]:
     """Read a WAV file and return its base64-encoded contents.
 
-    Returns None if the path is None or the file doesn't exist.
+    Cached on the file's (mtime, size) — see the note above; a re-recorded
+    clip is picked up automatically. Returns None if the path is None or
+    the file doesn't exist.
     """
     if not audio_path:
         return None
-    path = Path(audio_path)
-    if not path.exists():
-        logger.warning("Reference audio file not found: %s", audio_path)
-        return None
-    return base64.b64encode(path.read_bytes()).decode("ascii")
+    return _read_cached(
+        audio_path,
+        "Reference audio",
+        lambda path: base64.b64encode(path.read_bytes()).decode("ascii"),
+    )
 
 
 def read_transcript(transcript_path: Optional[str]) -> Optional[str]:
     """Read the reference audio transcript file.
 
+    Cached exactly like the audio it describes, and for the same reason:
+    the streaming path asks for it once per sentence.
+
     Returns None if the path is None or the file doesn't exist.
     """
     if not transcript_path:
         return None
-    path = Path(transcript_path)
-    if not path.exists():
-        logger.warning("Transcript file not found: %s", transcript_path)
-        return None
-    return path.read_text(encoding="utf-8").strip()
+    return _read_cached(
+        transcript_path,
+        "Transcript",
+        lambda path: path.read_text(encoding="utf-8").strip(),
+    )

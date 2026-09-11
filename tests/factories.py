@@ -1120,6 +1120,7 @@ class FakeLLMClient:
     ):
         self.lines = lines
         self.post_response = post_response
+        self.headers = kwargs.get("headers") or {}
         self.payloads: List[dict] = []
         self.client_kwargs: dict = {}
 

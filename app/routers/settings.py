@@ -49,6 +49,7 @@ def _to_response(cfg: AppSettings) -> SettingsResponse:
             show_tool_calls=cfg.general.show_tool_calls,
             enable_persona_memories=cfg.general.enable_persona_memories,
             global_system_prompt=cfg.general.global_system_prompt,
+            debug_latency=cfg.general.debug_latency,
         ),
     )
 

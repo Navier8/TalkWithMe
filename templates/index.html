@@ -425,6 +425,13 @@
                             <textarea id="gsf-global-system-prompt" rows="3" placeholder="e.g. Do not use markdown in responses. Use plain text only."></textarea>
                             <span class="field-hint">Appended to the end of every persona's system prompt. Leave empty to disable.</span>
                         </div>
+                        <div class="form-row">
+                            <label class="settings-checkbox-label">
+                                <input id="gsf-debug-latency" type="checkbox">
+                                <span>Log latency breakdown</span>
+                            </label>
+                            <span class="field-hint">Print STT, LLM, and TTS timing details to the browser console and server log.</span>
+                        </div>
                     </fieldset>
                 </div>
                 <div class="form-actions">
@@ -441,6 +448,10 @@
     <script src="/static/state.js"></script>
     <script src="/static/utils.js"></script>
     <script src="/static/theme.js"></script>
+    <!-- latency.js defines the `latency` object that chat.js, stt.js and
+         tts.js call unconditionally (it no-ops when debug_latency is off).
+         It must load before them or sendMessage() throws on its first line. -->
+    <script src="/static/latency.js"></script>
     <script src="/static/persistence.js"></script>
     <script src="/static/tts.js"></script>
     <script src="/static/stt.js"></script>

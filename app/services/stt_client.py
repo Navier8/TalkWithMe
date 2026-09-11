@@ -7,13 +7,19 @@ a warning and returns None to the caller.
 
 import logging
 import mimetypes
+import time
 from typing import Optional
 
 import httpx
 
 from app.config import get_settings
+from app.services import http_pool
 
 logger = logging.getLogger(__name__)
+
+# /health is a liveness probe, not a transcription: it gets its own short
+# budget rather than stt.timeout. Named because it keys a pooled client.
+_HEALTH_TIMEOUT_S = 3.0
 
 
 def _mime_to_extension(mime_type: str) -> str:
@@ -21,6 +27,8 @@ def _mime_to_extension(mime_type: str) -> str:
     base = (mime_type or "").split(";", 1)[0].strip()
     if "/" not in base:
         return "bin"
+    if base == "audio/webm":
+        return "webm"
     ext = mimetypes.guess_extension(base)
     if ext and ext.startswith("."):
         return ext[1:]  # strip leading dot
@@ -39,9 +47,9 @@ async def check_stt_health() -> bool:
     if not settings.stt.is_active:
         return False
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(f"{settings.stt.base_url}/health")
-            return resp.status_code in (200, 404)
+        client = http_pool.get_client("stt", _HEALTH_TIMEOUT_S)
+        resp = await client.get(f"{settings.stt.base_url}/health")
+        return resp.status_code in (200, 404)
     except Exception:
         return False
 
@@ -73,19 +81,25 @@ async def transcribe_audio(audio_bytes: bytes, mime_type: str = "audio/webm") ->
         "response_format": "json",
     }
 
+    started = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=settings.stt.timeout) as client:
-            resp = await client.post(url, files=files, data=data)
-            resp.raise_for_status()
-            json_response = resp.json()
-            text = json_response.get("text") or "No response received from STT server"
-            return {
-                "text": text,
-                # "language" is optional in the response; default to "en" if absent
-                "language": json_response.get("language") or "en",
-                # "language_probability" is optional; None if the server doesn't provide it
-                "language_probability": json_response.get("language_probability"),
-            }
+        client = http_pool.get_client("stt", settings.stt.timeout)
+        resp = await client.post(url, files=files, data=data)
+        resp.raise_for_status()
+        json_response = resp.json()
+        if settings.general.debug_latency:
+            logger.info(
+                "[latency] STT transcription: %.0f ms (%d bytes of %s audio)",
+                (time.monotonic() - started) * 1000, len(audio_bytes), mime_type,
+            )
+        text = json_response.get("text") or "No response received from STT server"
+        return {
+            "text": text,
+            # "language" is optional in the response; default to "en" if absent
+            "language": json_response.get("language") or "en",
+            # "language_probability" is optional; None if the server doesn't provide it
+            "language_probability": json_response.get("language_probability"),
+        }
     except httpx.ConnectError as exc:
         logger.error("STT connect error (server unreachable at %s): %s", url, exc)
     except httpx.TimeoutException as exc:

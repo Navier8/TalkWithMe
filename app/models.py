@@ -228,6 +228,7 @@ class GeneralSettingsRequest(BaseModel):
     # string) overrides it. This is what lets the General settings dialog
     # clear the prompt by saving a blank textarea.
     global_system_prompt: Optional[str] = None
+    debug_latency: Optional[bool] = None
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -270,6 +271,7 @@ class GeneralSettingsResponse(BaseModel):
     show_tool_calls: bool
     enable_persona_memories: bool
     global_system_prompt: str
+    debug_latency: bool
 
 
 class SettingsResponse(BaseModel):

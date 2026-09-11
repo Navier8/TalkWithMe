@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import app.config as app_config
 import app.persistence as persistence
 import app.routers.persistence as persistence_router
+import app.services.http_pool as http_pool
 import app.services.llm as llm_module
 import app.services.llm_auth as llm_auth
 import app.services.tool_registry as tool_registry
@@ -37,6 +38,9 @@ def isolated_app_state(tmp_path, monkeypatch):
     monkeypatch.setattr(app_config, "_PROJECT_ROOT", tmp_path)
     # All chatroom history/audio files land here.
     monkeypatch.setattr(persistence, "_PERSISTENCE_ROOT", tmp_path / "chatrooms")
+    # A real TALKWITHME_LLM_API_KEY in the developer's shell/.env must not
+    # leak into tests that exercise load_settings() directly.
+    monkeypatch.delenv("TALKWITHME_LLM_API_KEY", raising=False)
     # The persistence router imported _PERSISTENCE_ROOT by value at import
     # time, so it needs its own patch to stay in sync.
     monkeypatch.setattr(persistence_router, "_PERSISTENCE_ROOT", tmp_path / "chatrooms")
@@ -52,6 +56,13 @@ def isolated_app_state(tmp_path, monkeypatch):
     # The TTS capabilities cache (single slot, docs and failures alike):
     # a doc cached by one test must not leak into the next.
     tts_client.invalidate_capabilities()
+    # Reference audio / transcript bytes are memoized on (path, mtime, size).
+    # Two tests can write different content to the same tmp_path-relative
+    # name within one mtime tick, so drop the cache rather than rely on it.
+    tts_client.invalidate_reference_cache()
+    # Pooled httpx clients. Tests monkeypatch httpx.AsyncClient with fakes;
+    # a fake cached by one test would otherwise serve the next one.
+    http_pool.reset()
     # The LLM API key: never read the real llm_api_key file or the
     # developer's TALKWITHME_LLM_API_KEY, and never let a key cached by an
     # earlier test leak into the next one.
@@ -61,6 +72,10 @@ def isolated_app_state(tmp_path, monkeypatch):
     # The once-per-URL cleartext warning dedupe in llm.py must not survive
     # a test boundary.
     llm_module._warned_plaintext_urls.clear()
+    # Nor the per-URL "this server rejected cache_prompt" verdict: a test
+    # that provoked a 400 would otherwise silently drop the field from
+    # every payload the next test inspects.
+    llm_module._no_cache_prompt_urls.clear()
 
     # The global session singleton: start every test clean.
     global_session._history.clear()
@@ -72,8 +87,11 @@ def isolated_app_state(tmp_path, monkeypatch):
     persistence._pending_audio.clear()
     tool_registry.reset()
     tts_client.invalidate_capabilities()
+    tts_client.invalidate_reference_cache()
+    http_pool.reset()
     llm_auth.invalidate_llm_api_key()
     llm_module._warned_plaintext_urls.clear()
+    llm_module._no_cache_prompt_urls.clear()
     global_session._history.clear()
     global_session._active_personas.clear()
     global_session.set_current_room("default")

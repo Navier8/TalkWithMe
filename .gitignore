@@ -14,3 +14,18 @@ restore.sh
 startup.sh
 llm_api_key
 
+# Secrets — never commit. The LLM API key is resolved by
+# app/services/llm_auth.py from the TALKWITHME_LLM_API_KEY env var or the
+# llm_api_key file (ignored above; llm_api_key.example is the template).
+# .env is kept ignored for anyone who sources their env vars from one.
+.env
+
+# Codebase indexing cache (codebase-memory-mcp)
+.codebase-memory/
+
+# Local runtime/dev tooling (machine-specific, not project code)
+# run.bat is NOT ignored: every path in it is derived from %~dp0 at runtime,
+# so it contains no machine-specific or personal information. data/ holds the
+# PIDs of the running servers and is genuinely per-machine.
+data/
+

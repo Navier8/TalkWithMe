@@ -383,6 +383,7 @@ async function submitSettings(e) {
             personaNameMentionsEnabled = saved.general.persona_name_mentions;
             maxPersonaReplies = saved.general.max_persona_replies ?? 1;
             maxTurnsForContext = saved.general.max_turns_for_context ?? 6;
+            debugLatencyEnabled = saved.general.debug_latency ?? false;
         }
         // Re-check service health to update UI availability after settings change
         await checkTTSHealth();

@@ -79,6 +79,7 @@ class TestGetSettings:
             "show_tool_calls": True,
             "enable_persona_memories": True,
             "global_system_prompt": "",
+            "debug_latency": False,
         }
 
 
@@ -113,6 +114,7 @@ class TestUpdateSettings:
         current.general.show_tool_calls = True
         current.general.enable_persona_memories = False  # non-default: preserved?
         current.general.global_system_prompt = "No markdown, plain text only."  # non-default: preserved?
+        current.general.debug_latency = True
         monkeypatch.setattr(app_config, "_settings_cache", current)
 
         resp = client.put("/api/settings", json=base_update(
@@ -126,6 +128,7 @@ class TestUpdateSettings:
             "show_tool_calls": False,         # updated
             "enable_persona_memories": False, # preserved
             "global_system_prompt": "No markdown, plain text only.",  # preserved
+            "debug_latency": True,            # preserved
         }
 
     def test_missing_general_section_preserves_everything(self, client, monkeypatch):
@@ -138,6 +141,7 @@ class TestUpdateSettings:
         current.general.show_tool_calls = False
         current.general.enable_persona_memories = False  # must not reset to True
         current.general.global_system_prompt = "Plain text only."  # must not reset to ""
+        current.general.debug_latency = True
         monkeypatch.setattr(app_config, "_settings_cache", current)
 
         payload = base_update()
@@ -153,6 +157,7 @@ class TestUpdateSettings:
             "show_tool_calls": False,
             "enable_persona_memories": False,
             "global_system_prompt": "Plain text only.",
+            "debug_latency": True,
         }
 
     def test_enable_persona_memories_round_trip(self, client):

@@ -1,1 +1,13 @@
-chat_rooms: []
+chat_rooms:
+- name: Test1
+  persona_names:
+  - Kirk
+  - Spock
+  - Scotty
+  - McCoy
+  echo_chamber: true
+- name: Simple
+  persona_names:
+  - Luna
+  - Alex
+  echo_chamber: false
